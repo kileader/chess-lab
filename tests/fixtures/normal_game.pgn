@@ -1,0 +1,14 @@
+[Event "Chess Lab Test"]
+[Site "Local"]
+[Date "2026.08.27"]
+[Round "1"]
+[White "Alice"]
+[Black "Bob"]
+[Result "1-0"]
+[WhiteElo "1500"]
+[BlackElo "1450"]
+[TimeControl "600+5"]
+[ECO "C20"]
+[Opening "King's Pawn Game"]
+
+1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6?? 4. Qxf7# 1-0
