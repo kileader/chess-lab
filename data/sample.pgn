@@ -12,3 +12,18 @@
 [Opening "King's Pawn Game"]
 
 1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6?? 4. Qxf7# 1-0
+
+[Event "Chess Lab Sample"]
+[Site "Local"]
+[Date "2026.08.27"]
+[Round "2"]
+[White "Carol"]
+[Black "David"]
+[Result "1/2-1/2"]
+[WhiteElo "1600"]
+[BlackElo "1600"]
+[TimeControl "600+5"]
+[ECO "D30"]
+[Opening "Queen's Gambit Declined"]
+
+1. d4 d5 2. c4 e6 3. Nc3 Nf6 1/2-1/2
