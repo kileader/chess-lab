@@ -1,6 +1,8 @@
 """Load chess games from PGN files."""
 
+from io import StringIO
 from pathlib import Path
+from typing import TextIO
 
 import chess.pgn
 
@@ -52,18 +54,31 @@ def game_to_record(game: chess.pgn.Game) -> GameRecord:
     )
 
 
-def load_games(path: Path) -> list[chess.pgn.Game]:
-    """Load every game in a PGN file."""
+def _read_games(pgn_file: TextIO) -> list[chess.pgn.Game]:
+    """Read every game from an open PGN text stream."""
     games: list[chess.pgn.Game] = []
 
-    with path.open(encoding="utf-8") as pgn_file:
-        while True:
-            game = chess.pgn.read_game(pgn_file)
-            if game is None:
-                break
-            games.append(game)
+    while True:
+        game = chess.pgn.read_game(pgn_file)
+        if game is None:
+            break
+        games.append(game)
 
     return games
+
+
+def load_games(path: Path) -> list[chess.pgn.Game]:
+    """Load every game from a PGN file path."""
+    with path.open(encoding="utf-8") as pgn_file:
+        return _read_games(pgn_file)
+
+
+def parse_game_records(pgn_text: str) -> list[GameRecord]:
+    """Parse PGN text into structured Chess Lab records."""
+    with StringIO(pgn_text) as pgn_file:
+        games = _read_games(pgn_file)
+
+    return [game_to_record(game) for game in games]
 
 
 def load_game_records(path: Path) -> list[GameRecord]:
