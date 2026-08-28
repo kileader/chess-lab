@@ -14,6 +14,7 @@ from chesslab.importer import iter_game_records
 from chesslab.models import GameRecord
 from chesslab.openings import OpeningCatalog
 from chesslab.storage import SQLiteGameStorage
+from chesslab.theory import assess_pgn_opening, first_major_mistake
 
 
 class ImportResponse(BaseModel):
@@ -152,6 +153,36 @@ class OpeningDetail(ResultBreakdown):
     recent_games: list[OpeningGame]
 
 
+class OpeningTheory(BaseModel):
+    family: str
+    reference_opening: str
+    opening_ply: int
+    white_centipawns: int
+    player_centipawns: int
+    verdict: str
+
+
+class OpeningReview(BaseModel):
+    date: str | None
+    white: str | None
+    black: str | None
+    source_url: str | None
+    move: str | None
+    move_number: int | None
+    centipawns_lost: int | None
+
+
+class RepertoireItemInput(BaseModel):
+    context: str
+    opening: str
+    status: Literal["keep", "practice", "try"]
+    note: str = ""
+
+
+class RepertoireItem(RepertoireItemInput):
+    id: int
+
+
 app = FastAPI(title=APP_NAME)
 allowed_origins = os.environ.get(
     "CHESSLAB_ALLOWED_ORIGINS",
@@ -258,6 +289,30 @@ def list_users(storage: StorageDependency) -> list[UserProfile]:
     return [UserProfile.model_validate(profile) for profile in storage.list_user_profiles()]
 
 
+@app.get("/api/users/{user_id}/repertoire", response_model=list[RepertoireItem])
+def user_repertoire(user_id: int, storage: StorageDependency) -> list[RepertoireItem]:
+    """Return the selected user's saved opening plan."""
+    items = storage.get_user_repertoire(user_id)
+    if items is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+    return [RepertoireItem.model_validate(item) for item in items]
+
+
+@app.post("/api/users/{user_id}/repertoire", response_model=list[RepertoireItem])
+def save_user_repertoire(
+    user_id: int,
+    items: list[RepertoireItemInput],
+    storage: StorageDependency,
+) -> list[RepertoireItem]:
+    """Save one or more entries in the selected user's opening plan."""
+    saved = storage.save_repertoire_items(
+        user_id, [item.model_dump() for item in items]
+    )
+    if saved is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+    return [RepertoireItem.model_validate(item) for item in saved]
+
+
 @app.get("/api/users/{user_id}/overview", response_model=UserOverview)
 def user_overview(
     user_id: int,
@@ -266,6 +321,7 @@ def user_overview(
     date_to: Annotated[str | None, Query(pattern=r"^\d{4}\.\d{2}\.\d{2}$")] = None,
     color: Literal["white", "black"] | None = None,
     grouping: Literal["family", "variation"] = "family",
+    opening_limit: Annotated[int, Query(ge=1, le=100)] = 10,
 ) -> UserOverview:
     """Return high-level statistics from the selected user's perspective."""
     overview = storage.get_user_overview(
@@ -274,6 +330,7 @@ def user_overview(
         date_to=date_to,
         color=color,
         grouping=grouping,
+        opening_limit=opening_limit,
     )
     if overview is None:
         raise HTTPException(
@@ -302,3 +359,42 @@ def user_opening_detail(
             detail="User or opening family not found.",
         )
     return OpeningDetail.model_validate(detail)
+
+
+@app.get("/api/users/{user_id}/openings/theory", response_model=OpeningTheory)
+def user_opening_theory(
+    user_id: int,
+    storage: StorageDependency,
+    family: Annotated[str, Query(min_length=1, max_length=160)],
+    date_from: Annotated[str | None, Query(pattern=r"^\d{4}\.\d{2}\.\d{2}$")] = None,
+    date_to: Annotated[str | None, Query(pattern=r"^\d{4}\.\d{2}\.\d{2}$")] = None,
+    color: Literal["white", "black"] | None = None,
+) -> OpeningTheory:
+    """Evaluate a representative classified opening position with local Stockfish."""
+    reference = storage.get_opening_reference_game(
+        user_id, family, date_from=date_from, date_to=date_to, color=color
+    )
+    if reference is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opening not found.")
+    assessment = assess_pgn_opening(
+        str(reference["pgn"]),
+        reference["opening_ply"] if isinstance(reference["opening_ply"], int) else None,
+        str(reference["player_color"]),
+    )
+    if assessment is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Stockfish is unavailable.")
+    return OpeningTheory(
+        family=family,
+        reference_opening=str(reference["opening"]),
+        **assessment,
+    )
+
+
+@app.get("/api/users/{user_id}/openings/review", response_model=list[OpeningReview])
+def user_opening_review(user_id: int, storage: StorageDependency, family: str, date_from: str | None = None, date_to: str | None = None, color: Literal["white", "black"] | None = None) -> list[OpeningReview]:
+    """Analyze three recent losses in an opening and identify first large mistakes."""
+    reviews = []
+    for game in storage.get_recent_opening_losses(user_id, family, date_from=date_from, date_to=date_to, color=color):
+        mistake = first_major_mistake(str(game.pop("pgn")), str(game.pop("player_color")))
+        reviews.append({**game, **(mistake or {"move": None, "move_number": None, "centipawns_lost": None})})
+    return reviews

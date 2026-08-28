@@ -54,13 +54,17 @@ type PageProps = {
 
 const apiBase = process.env.CHESSLAB_API_URL ?? 'http://127.0.0.1:8000';
 
-async function loadOverview(filters: AnalysisFilters): Promise<UserOverview | null> {
+async function loadOverview(
+  filters: AnalysisFilters,
+  openingLimit = 10,
+): Promise<UserOverview | null> {
   try {
     const query = new URLSearchParams();
     if (filters.date_from) query.set('date_from', filters.date_from);
     if (filters.date_to) query.set('date_to', filters.date_to);
     if (filters.color) query.set('color', filters.color);
     query.set('grouping', filters.grouping);
+    query.set('opening_limit', String(openingLimit));
     const response = await fetch(`${apiBase}/api/users/1/overview?${query}`, {
       cache: 'no-store',
     });
@@ -106,13 +110,31 @@ function firstValue(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function parseApiDate(value: string) {
+  const [year, month, day] = value.split('.').map(Number);
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+function comparisonPeriod(startValue: string | undefined, endValue: string | null | undefined) {
+  if (!startValue || !endValue) return null;
+  const start = parseApiDate(startValue);
+  const end = parseApiDate(endValue);
+  const days = Math.floor((end.getTime() - start.getTime()) / 86_400_000) + 1;
+  if (days < 1) return null;
+  const previousEnd = new Date(start);
+  previousEnd.setUTCDate(previousEnd.getUTCDate() - 1);
+  const previousStart = new Date(previousEnd);
+  previousStart.setUTCDate(previousStart.getUTCDate() - days + 1);
+  return { date_from: apiDate(previousStart), date_to: apiDate(previousEnd), days };
+}
+
 export default async function Home({ searchParams }: PageProps) {
   const params = await searchParams;
-  const oneYearAgo = new Date();
-  oneYearAgo.setUTCFullYear(oneYearAgo.getUTCFullYear() - 1);
+  const ninetyDaysAgo = new Date();
+  ninetyDaysAgo.setUTCDate(ninetyDaysAgo.getUTCDate() - 90);
   const period = firstValue(params.period);
   const filters: AnalysisFilters = {
-    date_from: period === 'all' ? undefined : firstValue(params.date_from) ?? apiDate(oneYearAgo),
+    date_from: period === 'all' ? undefined : firstValue(params.date_from) ?? apiDate(ninetyDaysAgo),
     date_to: firstValue(params.date_to),
     color: firstValue(params.color) === 'white' || firstValue(params.color) === 'black'
       ? firstValue(params.color) as 'white' | 'black'
@@ -151,6 +173,48 @@ export default async function Home({ searchParams }: PageProps) {
   if (period === 'all') detailQuery.set('period', 'all');
   const minYear = Number(lifetimeOverview.first_game_date?.slice(0, 4)) || new Date().getFullYear();
   const maxYear = Number(lifetimeOverview.last_game_date?.slice(0, 4)) || new Date().getFullYear();
+  const priorPeriod = comparisonPeriod(
+    filters.date_from,
+    overview.last_game_date,
+  );
+  const practiceOverview = await loadOverview({ ...filters, grouping: 'family' }, 50);
+  const priorOverview = priorPeriod
+    ? await loadOverview({
+        date_from: priorPeriod.date_from,
+        date_to: priorPeriod.date_to,
+        color: filters.color,
+        grouping: 'family',
+      }, 50)
+    : null;
+  const priorOpenings = new Map(
+    priorOverview?.top_openings.map((opening) => [opening.opening, opening]) ?? [],
+  );
+  const comparisonOpenings = (practiceOverview?.top_openings ?? []).map((opening) => {
+    const prior = priorOpenings.get(opening.opening);
+    const currentScore = scorePercent(opening.wins, opening.draws, opening.games);
+    const priorScore = prior
+      ? scorePercent(prior.wins, prior.draws, prior.games)
+      : null;
+    return { ...opening, currentScore, prior, priorScore, change: priorScore === null ? null : currentScore - priorScore };
+  });
+  const practiceTargets = comparisonOpenings
+    .filter((opening) => opening.games >= 12 && (
+      opening.currentScore < 45 || (opening.prior && opening.prior.games >= 8 && (opening.change ?? 0) <= -5)
+    ))
+    .sort((left, right) => left.currentScore - right.currentScore || right.games - left.games)
+    .slice(0, 3);
+  const dropTargets = filters.color === 'black'
+    ? comparisonOpenings
+      .filter((opening) => opening.games >= 12)
+      .sort((left, right) => left.currentScore - right.currentScore || right.games - left.games)
+      .slice(0, 3)
+    : [];
+  const practiceReason = (opening: typeof comparisonOpenings[number]) => {
+    if (opening.change !== null && opening.change <= -5) {
+      return `${Math.abs(opening.change).toFixed(1)} points worse than before`;
+    }
+    return 'Your results are low';
+  };
 
   return (
     <main className="app-shell">
@@ -162,6 +226,7 @@ export default async function Home({ searchParams }: PageProps) {
         <nav aria-label="Primary navigation">
           <a className="nav-active" href="#overview">Overview</a>
           <a href="#openings">Openings</a>
+          <a href="/repertoire">Repertoire</a>
           <a href="#games">Games</a>
           <a href="#upload">Import</a>
         </nav>
@@ -218,6 +283,37 @@ export default async function Home({ searchParams }: PageProps) {
             <span>Across all time controls</span>
           </article>
         </section>
+
+        {practiceOverview && (
+          <section className={`practice-panel panel ${dropTargets.length ? '' : 'practice-panel-single'}`} aria-labelledby="practice-title">
+            <div className="panel-heading">
+              <div><p className="eyebrow">What to work on</p><h2 id="practice-title">Practice or replace</h2></div>
+              <span className="panel-note">{priorPeriod ? `Compared with the preceding ${priorPeriod.days} days` : 'Based on the selected period'}</span>
+            </div>
+            <div className="practice-grid">
+              <div className="practice-column">
+                <p className="eyebrow">Practice now</p>
+                {practiceTargets.length ? practiceTargets.map((opening) => (
+                  <a className="practice-row" href={`/openings/${encodeURIComponent(opening.opening)}${detailQuery.size ? `?${detailQuery}` : ''}`} key={opening.opening}>
+                    <span className="eco-badge">{opening.eco ?? '—'}</span>
+                    <span><strong>{opening.opening}</strong><small>{opening.games} games · {opening.currentScore.toFixed(1)}% score</small></span>
+                    <b className="trend-down">{practiceReason(opening)}</b>
+                  </a>
+                )) : <p className="practice-empty">No opening family has both a meaningful sample and a clear concern signal in this period.</p>}
+              </div>
+              {dropTargets.length > 0 && <div className="practice-column practice-drop">
+                <p className="eyebrow">Openings you could replace</p>
+                {dropTargets.map((opening) => (
+                    <a className="practice-row" href={`/openings/${encodeURIComponent(opening.opening)}${detailQuery.size ? `?${detailQuery}` : ''}`} key={opening.opening}>
+                      <span className="eco-badge">{opening.eco ?? '—'}</span>
+                      <span><strong>{opening.opening}</strong><small>{opening.games} games · {opening.currentScore.toFixed(1)}% score{opening.priorScore === null ? '' : ` · ${opening.priorScore.toFixed(1)}% prior`}</small></span>
+                      <b className="trend-down">See details</b>
+                    </a>
+                  ))}
+              </div>}
+            </div>
+          </section>
+        )}
 
         <section className="content-grid" id="openings">
           <article className="panel openings-panel">

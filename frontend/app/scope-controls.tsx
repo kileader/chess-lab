@@ -23,6 +23,12 @@ function apiDate(date: Date) {
   return date.toISOString().slice(0, 10).replaceAll('-', '.');
 }
 
+function displayDate(value: string) {
+  const [year, month, day] = value.split('.').map(Number);
+  return new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric' })
+    .format(new Date(Date.UTC(year, month - 1, day)));
+}
+
 export function ScopeControls({
   minYear,
   maxYear,
@@ -38,10 +44,24 @@ export function ScopeControls({
   const [color, setColor] = useState(initialColor);
   const [grouping, setGrouping] = useState(initialGrouping);
   const today = new Date();
-  const yearAgo = new Date(today);
-  yearAgo.setUTCFullYear(yearAgo.getUTCFullYear() - 1);
-  const twoYearsAgo = new Date(today);
-  twoYearsAgo.setUTCFullYear(twoYearsAgo.getUTCFullYear() - 2);
+  const thirtyDaysAgo = new Date(today);
+  thirtyDaysAgo.setUTCDate(thirtyDaysAgo.getUTCDate() - 30);
+  const ninetyDaysAgo = new Date(today);
+  ninetyDaysAgo.setUTCDate(ninetyDaysAgo.getUTCDate() - 90);
+  const sixMonthsAgo = new Date(today);
+  sixMonthsAgo.setUTCMonth(sixMonthsAgo.getUTCMonth() - 6);
+
+  const periodLabel = !dateFrom
+    ? 'All time'
+    : dateFrom === apiDate(thirtyDaysAgo) && !dateTo
+      ? 'Last 30 days'
+      : dateFrom === apiDate(ninetyDaysAgo) && !dateTo
+        ? 'Last 90 days'
+        : dateFrom === apiDate(sixMonthsAgo) && !dateTo
+          ? 'Last 6 months'
+          : `${displayDate(dateFrom)} — ${dateTo ? displayDate(dateTo) : 'latest game'}`;
+  const colorLabel = color === 'all' ? 'all colors' : `as ${color}`;
+  const groupingLabel = grouping === 'family' ? 'families' : 'variations';
 
   const shared = {
     color: color === 'all' ? undefined : color,
@@ -61,10 +81,15 @@ export function ScopeControls({
   return (
     <section className="scope-panel" aria-label="Analysis scope">
       <div className="scope-heading">
-        <div><p className="eyebrow">Analysis scope</p><strong>{filteredGames.toLocaleString()} of {totalGames.toLocaleString()} games</strong></div>
+        <div>
+          <p className="eyebrow">Analysis scope</p>
+          <strong>{filteredGames.toLocaleString()} of {totalGames.toLocaleString()} games</strong>
+          <p className="scope-selection">Viewing: <b>{periodLabel}</b> · {colorLabel} · {groupingLabel}</p>
+        </div>
         <div className="period-presets" aria-label="Time period presets">
-          <a href={queryFor({ ...shared, date_from: apiDate(yearAgo) })}>Last year</a>
-          <a href={queryFor({ ...shared, date_from: apiDate(twoYearsAgo) })}>Last 2 years</a>
+          <a href={queryFor({ ...shared, date_from: apiDate(thirtyDaysAgo) })}>Last 30 days</a>
+          <a href={queryFor({ ...shared, date_from: apiDate(ninetyDaysAgo) })}>Last 90 days</a>
+          <a href={queryFor({ ...shared, date_from: apiDate(sixMonthsAgo) })}>Last 6 months</a>
           <a href={queryFor({ ...shared, period: 'all' })}>All time</a>
         </div>
       </div>

@@ -58,6 +58,18 @@ CREATE TABLE IF NOT EXISTS user_games (
 )
 """
 
+CREATE_REPERTOIRE_ITEMS_TABLE = """
+CREATE TABLE IF NOT EXISTS repertoire_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    context TEXT NOT NULL,
+    opening TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('keep', 'practice', 'try')),
+    note TEXT NOT NULL DEFAULT '',
+    UNIQUE(user_id, context, opening)
+)
+"""
+
 MIGRATION_COLUMNS = {
     "opening_ply": "INTEGER",
     "site": "TEXT",
@@ -120,6 +132,12 @@ class SQLiteGameStorage:
         connection.execute(CREATE_USERS_TABLE)
         connection.execute(CREATE_PLAYER_IDENTITIES_TABLE)
         connection.execute(CREATE_USER_GAMES_TABLE)
+        connection.execute(CREATE_REPERTOIRE_ITEMS_TABLE)
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_repertoire_items_user_context "
+            "ON repertoire_items(user_id, context)"
+        )
+        connection.execute("PRAGMA optimize")
         return connection
 
     @staticmethod
@@ -229,6 +247,55 @@ class SQLiteGameStorage:
             "identities": [dict(identity) for identity in identities],
         }
 
+    def save_repertoire_items(
+        self, user_id: int, items: Iterable[dict[str, str]]
+    ) -> list[dict[str, object]] | None:
+        """Create or update the selected user's opening plan."""
+        if self.get_user_profile(user_id) is None:
+            return None
+        with self._connect() as connection:
+            for item in items:
+                connection.execute(
+                    """
+                    INSERT INTO repertoire_items (user_id, context, opening, status, note)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, context, opening) DO UPDATE SET
+                        status = excluded.status,
+                        note = excluded.note
+                    """,
+                    (
+                        user_id,
+                        item["context"].strip(),
+                        item["opening"].strip(),
+                        item["status"],
+                        item.get("note", "").strip(),
+                    ),
+                )
+        return self.get_user_repertoire(user_id)
+
+    def get_user_repertoire(self, user_id: int) -> list[dict[str, object]] | None:
+        """Return a user's saved opening plan, organized by playing context."""
+        if self.get_user_profile(user_id) is None:
+            return None
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, context, opening, status, note
+                FROM repertoire_items
+                WHERE user_id = ?
+                ORDER BY
+                    CASE context
+                        WHEN 'As White' THEN 1
+                        WHEN 'As Black vs 1.e4' THEN 2
+                        WHEN 'As Black vs 1.d4' THEN 3
+                        ELSE 4
+                    END,
+                    id
+                """,
+                (user_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def list_user_profiles(self) -> list[dict[str, object]]:
         """Return all local user profiles."""
         with self._connect() as connection:
@@ -271,6 +338,7 @@ class SQLiteGameStorage:
         date_to: str | None = None,
         color: str | None = None,
         grouping: str = "family",
+        opening_limit: int = 10,
     ) -> dict[str, object] | None:
         """Calculate result and rating statistics from one user's perspective."""
         profile = self.get_user_profile(user_id)
@@ -321,6 +389,7 @@ class SQLiteGameStorage:
                 date_to=date_to,
                 color=color,
                 grouping=grouping,
+                limit=opening_limit,
             ),
         }
 
@@ -480,6 +549,63 @@ class SQLiteGameStorage:
             "years": [dict(row) for row in years],
             "recent_games": [dict(row) for row in recent_games],
         }
+
+    def get_opening_reference_game(
+        self,
+        user_id: int,
+        family: str,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        color: str | None = None,
+    ) -> dict[str, object] | None:
+        """Return one common classified position to represent an opening family."""
+        escaped_family = family.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        where, parameters = self._user_game_filter(
+            user_id, date_from=date_from, date_to=date_to, color=color
+        )
+        opening_filter = "(game.opening = ? OR game.opening LIKE ? ESCAPE '\\')"
+        with self._connect() as connection:
+            variation = connection.execute(
+                f"""
+                SELECT game.opening
+                FROM user_games AS link
+                JOIN games AS game ON game.id = link.game_id
+                WHERE {where} AND {opening_filter}
+                GROUP BY game.opening
+                ORDER BY COUNT(*) DESC, game.opening
+                LIMIT 1
+                """,
+                (*parameters, family, f"{escaped_family}:%"),
+            ).fetchone()
+            if variation is None:
+                return None
+            row = connection.execute(
+                f"""
+                SELECT game.opening, game.opening_ply, game.pgn, link.player_color
+                FROM user_games AS link
+                JOIN games AS game ON game.id = link.game_id
+                WHERE {where} AND game.opening = ?
+                ORDER BY game.id DESC
+                LIMIT 1
+                """,
+                (*parameters, variation["opening"]),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_recent_opening_losses(self, user_id: int, family: str, *, date_from: str | None = None, date_to: str | None = None, color: str | None = None, limit: int = 3) -> list[dict[str, object]]:
+        """Return a few recent losses with their PGNs for focused engine review."""
+        escaped = family.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        where, parameters = self._user_game_filter(user_id, date_from=date_from, date_to=date_to, color=color)
+        with self._connect() as connection:
+            rows = connection.execute(f"""
+                SELECT game.date, game.white, game.black, game.source_url, game.pgn, link.player_color
+                FROM user_games AS link JOIN games AS game ON game.id = link.game_id
+                WHERE {where} AND (game.opening = ? OR game.opening LIKE ? ESCAPE '\\')
+                  AND ((link.player_color = 'white' AND game.result = '0-1') OR (link.player_color = 'black' AND game.result = '1-0'))
+                ORDER BY game.date DESC, game.id DESC LIMIT ?
+            """, (*parameters, family, f"{escaped}:%", limit)).fetchall()
+        return [dict(row) for row in rows]
 
     def backfill_openings(self, catalog: object) -> tuple[int, int]:
         """Classify stored games missing opening metadata."""

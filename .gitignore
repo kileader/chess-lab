@@ -9,6 +9,7 @@ __pycache__/
 # Temporary files created while setting up Python packages
 .python-temp/
 .pnpm-store/
+tools/stockfish/
 
 # Local databases
 *.db

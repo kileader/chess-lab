@@ -28,6 +28,19 @@ type OpeningDetail = ResultBreakdown & {
   }>;
 };
 
+type OpeningTheory = {
+  reference_opening: string;
+  player_centipawns: number;
+  verdict: string;
+};
+
+type OpeningReview = {
+  source_url: string | null;
+  move: string | null;
+  move_number: number | null;
+  centipawns_lost: number | null;
+};
+
 type PageProps = {
   params: Promise<{ slug: string }>;
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -57,6 +70,27 @@ async function loadDetail(family: string, filters: URLSearchParams): Promise<Ope
   }
 }
 
+async function loadTheory(family: string, filters: URLSearchParams): Promise<OpeningTheory | null> {
+  try {
+    const query = new URLSearchParams(filters);
+    query.set('family', family);
+    const response = await fetch(`${apiBase}/api/users/1/openings/theory?${query}`, { cache: 'no-store' });
+    if (!response.ok) return null;
+    return response.json() as Promise<OpeningTheory>;
+  } catch {
+    return null;
+  }
+}
+
+async function loadReviews(family: string, filters: URLSearchParams): Promise<OpeningReview[]> {
+  try {
+    const query = new URLSearchParams(filters);
+    query.set('family', family);
+    const response = await fetch(`${apiBase}/api/users/1/openings/review?${query}`, { cache: 'no-store' });
+    return response.ok ? response.json() as Promise<OpeningReview[]> : [];
+  } catch { return []; }
+}
+
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { slug } = await params;
   const family = decodeURIComponent(slug);
@@ -80,7 +114,7 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
   if (dateFrom) filters.set('date_from', dateFrom);
   if (dateTo) filters.set('date_to', dateTo);
   if (color === 'white' || color === 'black') filters.set('color', color);
-  const detail = await loadDetail(family, filters);
+  const [detail, theory, reviews] = await Promise.all([loadDetail(family, filters), loadTheory(family, filters), loadReviews(family, filters)]);
   const overviewFilters = new URLSearchParams(filters);
   if (period === 'all') overviewFilters.set('period', 'all');
   const overviewHref = `/${overviewFilters.size ? `?${overviewFilters}` : ''}#openings`;
@@ -102,6 +136,11 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
   const white = detail.colors.find((item) => item.color === 'white');
   const black = detail.colors.find((item) => item.color === 'black');
   const identity = detail.user.identities[0];
+  const losses = detail.recent_games.filter((game) => (
+    (game.player_color === 'white' && game.result === '0-1')
+    || (game.player_color === 'black' && game.result === '1-0')
+  ));
+  const reviewByUrl = new Map(reviews.map((review) => [review.source_url, review]));
 
   return (
     <main className="app-shell">
@@ -112,6 +151,7 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
         <nav aria-label="Primary navigation">
           <a href="/#overview">Overview</a>
           <a className="nav-active" href="/#openings">Openings</a>
+          <a href="/repertoire">Repertoire</a>
           <a href="/#games">Games</a>
           <a href="/#upload">Import</a>
         </nav>
@@ -144,6 +184,11 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
           </article>
         </section>
 
+        {theory && <section className="theory-panel panel">
+          <p className="eyebrow">Engine check</p>
+          <div><strong>Engine says: {theory.verdict}</strong><span>Based on your most-played line: {theory.reference_opening}</span></div>
+        </section>}
+
         <section className="detail-grid">
           <article className="panel detail-panel">
             <div className="panel-heading"><div><p className="eyebrow">Inside the family</p><h2>Variations</h2></div><span className="panel-note">Sorted by games played</span></div>
@@ -174,16 +219,17 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
         </section>
 
         <section className="panel detail-panel detail-games">
-          <div className="panel-heading"><div><p className="eyebrow">Latest examples</p><h2>Recent games</h2></div><span className="panel-note">Open the original game to review it</span></div>
+          <div className="panel-heading"><div><p className="eyebrow">Start here</p><h2>Recent losses to review</h2></div><span className="panel-note">Open a game to see what went wrong</span></div>
           <div className="game-list">
-            {detail.recent_games.map((game, index) => {
+            {(losses.length ? losses : detail.recent_games).map((game, index) => {
               const won = (game.player_color === 'white' && game.result === '1-0') || (game.player_color === 'black' && game.result === '0-1');
               const drew = game.result === '1/2-1/2';
               const outcome = drew ? 'Draw' : won ? 'Win' : 'Loss';
+              const review = reviewByUrl.get(game.source_url);
               return (
                 <a className="game-row" href={game.source_url ?? '#'} key={`${game.source_url}-${index}`} target={game.source_url ? '_blank' : undefined}>
                   <span className={`outcome outcome-${outcome.toLowerCase()}`}>{outcome[0]}</span>
-                  <div className="matchup"><strong>{game.white ?? 'Unknown'} <i>vs</i> {game.black ?? 'Unknown'}</strong><span>{game.opening ?? detail.family}</span></div>
+                  <div className="matchup"><strong>{game.white ?? 'Unknown'} <i>vs</i> {game.black ?? 'Unknown'}</strong><span>{review?.move ? `Check move ${review.move_number}: ${review.move} lost about ${(review.centipawns_lost! / 100).toFixed(1)} pawns` : game.opening ?? detail.family}</span></div>
                   <span className="game-meta">{game.time_control ?? '—'}</span><span className="game-meta">{game.date ?? '—'}</span>
                 </a>
               );
