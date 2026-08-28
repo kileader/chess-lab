@@ -1,8 +1,11 @@
 """SQLite persistence for structured Chess Lab game records."""
 
+import io
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
+
+import chess.pgn
 
 from chesslab.models import GameRecord
 
@@ -296,6 +299,46 @@ class SQLiteGameStorage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def update_repertoire_item(
+        self, user_id: int, item_id: int, item: dict[str, str]
+    ) -> dict[str, object] | None:
+        """Update one saved opening-plan entry owned by a user."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE repertoire_items
+                SET context = ?, opening = ?, status = ?, note = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (
+                    item["context"].strip(),
+                    item["opening"].strip(),
+                    item["status"],
+                    item.get("note", "").strip(),
+                    item_id,
+                    user_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                """
+                SELECT id, context, opening, status, note
+                FROM repertoire_items WHERE id = ? AND user_id = ?
+                """,
+                (item_id, user_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def delete_repertoire_item(self, user_id: int, item_id: int) -> bool:
+        """Delete one saved opening-plan entry owned by a user."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM repertoire_items WHERE id = ? AND user_id = ?",
+                (item_id, user_id),
+            )
+        return cursor.rowcount > 0
+
     def list_user_profiles(self) -> list[dict[str, object]]:
         """Return all local user profiles."""
         with self._connect() as connection:
@@ -443,6 +486,65 @@ class SQLiteGameStorage:
                 (*parameters, limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_user_responses_to_first_move(
+        self,
+        user_id: int,
+        first_move: str,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        color: str | None = None,
+        limit: int = 8,
+    ) -> list[dict[str, object]]:
+        """Group opponents' first replies after one White first move."""
+        if color == "black":
+            return []
+        where, parameters = self._user_game_filter(
+            user_id, date_from=date_from, date_to=date_to, color="white"
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT game.pgn, game.result
+                FROM user_games AS link
+                JOIN games AS game ON game.id = link.game_id
+                WHERE {where}
+                """,
+                parameters,
+            ).fetchall()
+
+        responses: dict[str, dict[str, int]] = {}
+        for row in rows:
+            game = chess.pgn.read_game(io.StringIO(str(row["pgn"])))
+            if game is None:
+                continue
+            board = game.board()
+            moves = iter(game.mainline_moves())
+            white_move = next(moves, None)
+            black_move = next(moves, None)
+            if white_move is None or black_move is None:
+                continue
+            white_san = board.san(white_move)
+            board.push(white_move)
+            black_san = board.san(black_move)
+            if white_san != first_move:
+                continue
+            response = responses.setdefault(black_san, {"games": 0, "wins": 0, "draws": 0, "losses": 0})
+            response["games"] += 1
+            if row["result"] == "1-0":
+                response["wins"] += 1
+            elif row["result"] == "1/2-1/2":
+                response["draws"] += 1
+            else:
+                response["losses"] += 1
+
+        return [
+            {"reply": reply, **results}
+            for reply, results in sorted(
+                responses.items(), key=lambda item: (-item[1]["games"], item[0])
+            )[:limit]
+        ]
 
     def get_user_opening_detail(
         self,

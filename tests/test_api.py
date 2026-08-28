@@ -156,6 +156,12 @@ def test_user_overview_uses_linked_platform_identity(
     ]
     assert detail["recent_games"][0]["player_color"] == "white"
 
+    responses_response = client.get(f"/api/users/{user_id}/responses")
+    assert responses_response.status_code == 200
+    assert responses_response.json() == [
+        {"reply": "e5", "games": 1, "wins": 1, "draws": 0, "losses": 0}
+    ]
+
 
 def test_user_repertoire_is_saved_per_user(storage: SQLiteGameStorage) -> None:
     user_response = client.post(
@@ -185,3 +191,20 @@ def test_user_repertoire_is_saved_per_user(storage: SQLiteGameStorage) -> None:
         "note": "Established answer.",
     }
     assert client.get(f"/api/users/{user_id}/repertoire").json() == response.json()
+
+    item_id = response.json()[0]["id"]
+    update_response = client.patch(
+        f"/api/users/{user_id}/repertoire/{item_id}",
+        json={
+            "context": "As Black vs 1.d4",
+            "opening": "Slav Defense",
+            "status": "try",
+            "note": "Try this next.",
+        },
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["opening"] == "Slav Defense"
+
+    delete_response = client.delete(f"/api/users/{user_id}/repertoire/{item_id}")
+    assert delete_response.status_code == 204
+    assert client.get(f"/api/users/{user_id}/repertoire").json() == []

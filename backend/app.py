@@ -117,6 +117,10 @@ class ResultBreakdown(BaseModel):
     losses: int
 
 
+class FirstMoveResponse(ResultBreakdown):
+    reply: str
+
+
 class ColorBreakdown(ResultBreakdown):
     color: str
 
@@ -192,7 +196,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in allowed_origins if origin.strip()],
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
 default_storage = SQLiteGameStorage(
@@ -313,6 +317,31 @@ def save_user_repertoire(
     return [RepertoireItem.model_validate(item) for item in saved]
 
 
+@app.patch("/api/users/{user_id}/repertoire/{item_id}", response_model=RepertoireItem)
+def update_user_repertoire_item(
+    user_id: int,
+    item_id: int,
+    item: RepertoireItemInput,
+    storage: StorageDependency,
+) -> RepertoireItem:
+    """Update one entry in the selected user's opening plan."""
+    saved = storage.update_repertoire_item(user_id, item_id, item.model_dump())
+    if saved is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repertoire entry not found.")
+    return RepertoireItem.model_validate(saved)
+
+
+@app.delete("/api/users/{user_id}/repertoire/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user_repertoire_item(
+    user_id: int,
+    item_id: int,
+    storage: StorageDependency,
+) -> None:
+    """Delete one entry from the selected user's opening plan."""
+    if not storage.delete_repertoire_item(user_id, item_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repertoire entry not found.")
+
+
 @app.get("/api/users/{user_id}/overview", response_model=UserOverview)
 def user_overview(
     user_id: int,
@@ -338,6 +367,26 @@ def user_overview(
             detail="User not found.",
         )
     return UserOverview.model_validate(overview)
+
+
+@app.get("/api/users/{user_id}/responses", response_model=list[FirstMoveResponse])
+def user_first_move_responses(
+    user_id: int,
+    storage: StorageDependency,
+    first_move: Annotated[str, Query(min_length=2, max_length=12)] = "e4",
+    date_from: Annotated[str | None, Query(pattern=r"^\d{4}\.\d{2}\.\d{2}$")] = None,
+    date_to: Annotated[str | None, Query(pattern=r"^\d{4}\.\d{2}\.\d{2}$")] = None,
+    color: Literal["white", "black"] | None = None,
+) -> list[FirstMoveResponse]:
+    """Show how opponents reply to a user's first White move."""
+    if storage.get_user_profile(user_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+    return [
+        FirstMoveResponse.model_validate(response)
+        for response in storage.get_user_responses_to_first_move(
+            user_id, first_move, date_from=date_from, date_to=date_to, color=color
+        )
+    ]
 
 
 @app.get("/api/users/{user_id}/openings/detail", response_model=OpeningDetail)

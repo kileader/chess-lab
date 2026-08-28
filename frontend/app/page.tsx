@@ -41,6 +41,14 @@ type GamePage = {
   games: GameSummary[];
 };
 
+type FirstMoveResponse = {
+  reply: string;
+  games: number;
+  wins: number;
+  draws: number;
+  losses: number;
+};
+
 type AnalysisFilters = {
   date_from?: string;
   date_to?: string;
@@ -83,6 +91,20 @@ async function loadRecentGames(): Promise<GameSummary[]> {
     if (!response.ok) return [];
     const page = await response.json() as GamePage;
     return page.games;
+  } catch {
+    return [];
+  }
+}
+
+async function loadFirstMoveResponses(filters: AnalysisFilters): Promise<FirstMoveResponse[]> {
+  if (filters.color === 'black') return [];
+  try {
+    const query = new URLSearchParams({ first_move: 'e4' });
+    if (filters.date_from) query.set('date_from', filters.date_from);
+    if (filters.date_to) query.set('date_to', filters.date_to);
+    if (filters.color) query.set('color', filters.color);
+    const response = await fetch(`${apiBase}/api/users/1/responses?${query}`, { cache: 'no-store' });
+    return response.ok ? response.json() as Promise<FirstMoveResponse[]> : [];
   } catch {
     return [];
   }
@@ -141,10 +163,11 @@ export default async function Home({ searchParams }: PageProps) {
       : undefined,
     grouping: firstValue(params.grouping) === 'variation' ? 'variation' : 'family',
   };
-  const [overview, lifetimeOverview, recentGames] = await Promise.all([
+  const [overview, lifetimeOverview, recentGames, firstMoveResponses] = await Promise.all([
     loadOverview(filters),
     loadOverview({ grouping: 'family' }),
     loadRecentGames(),
+    loadFirstMoveResponses(filters),
   ]);
 
   if (!overview || !lifetimeOverview) {
@@ -283,6 +306,14 @@ export default async function Home({ searchParams }: PageProps) {
             <span>Across all time controls</span>
           </article>
         </section>
+
+        {firstMoveResponses.length > 0 && <section className="panel response-panel" aria-labelledby="responses-title">
+          <div className="panel-heading"><div><p className="eyebrow">As White</p><h2 id="responses-title">What you face after 1.e4</h2></div><span className="panel-note">Within your selected time window</span></div>
+          <div className="response-list">{firstMoveResponses.map((response) => {
+            const responseScore = scorePercent(response.wins, response.draws, response.games);
+            return <div className="response-row" key={response.reply}><strong>1…{response.reply}</strong><span>{response.games} games</span><span>{responseScore.toFixed(1)}% score</span><i aria-hidden="true"><b style={{ width: `${response.games / firstMoveResponses[0].games * 100}%` }} /></i></div>;
+          })}</div>
+        </section>}
 
         {practiceOverview && (
           <section className={`practice-panel panel ${dropTargets.length ? '' : 'practice-panel-single'}`} aria-labelledby="practice-title">
