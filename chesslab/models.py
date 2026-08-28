@@ -1,6 +1,10 @@
 """Structured data models used by Chess Lab."""
 
 from dataclasses import dataclass
+from typing import Literal
+
+
+GameSource = Literal["lichess", "chess_com", "other"]
 
 
 @dataclass(frozen=True)
@@ -16,4 +20,11 @@ class GameRecord:
     time_control: str | None
     eco: str | None
     opening: str | None
+    opening_ply: int | None
     move_count: int
+    site: str | None
+    source: GameSource
+    source_url: str | None
+    source_game_id: str | None
+    pgn: str
+    fingerprint: str

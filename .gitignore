@@ -8,3 +8,9 @@ __pycache__/
 
 # Temporary files created while setting up Python packages
 .python-temp/
+.pnpm-store/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
