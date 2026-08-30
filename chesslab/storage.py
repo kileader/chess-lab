@@ -573,7 +573,7 @@ class SQLiteGameStorage:
                 JOIN games AS game ON game.id = link.game_id
                 WHERE {where} AND game.opening IS NOT NULL
                 GROUP BY {group_expression}
-                ORDER BY games DESC, game.opening
+                ORDER BY games DESC, opening
                 LIMIT ?
                 """,
                 (*parameters, limit),

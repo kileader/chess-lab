@@ -1,5 +1,6 @@
 """Private account regression tests shared by SQLite and real PostgreSQL."""
 import os
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -109,6 +110,26 @@ def test_every_user_route_enforces_identity(accounts):
     assert client.get('/api/users', headers={'Authorization': 'Bearer alice'}).status_code == 404
     assert client.post('/api/users', headers={'Authorization': 'Bearer alice'}, json={}).status_code == 404
     assert client.get('/api/games').status_code == 401
+
+
+def test_opening_family_ordering_with_empty_and_populated_accounts(account_storage):
+    storage = account_storage
+    user_id = storage.ensure_account('family-ordering')
+    storage.configure_account(user_id, 'Alice', 'lichess', 'Alice')
+    assert storage.get_user_openings(user_id, grouping='family') == []
+    record = load_game_records(Path(__file__).parent / 'fixtures' / 'normal_game.pgn')[0]
+    openings = [('C41', 'Philidor Defense'), ('B50', 'Sicilian Defense: Modern Variations'),
+                ('B20', 'Sicilian Defense: Wing Gambit'), ('C00', 'French Defense')]
+    games = [replace(record, white='Alice', source='lichess', source_game_id=f'family-{index}',
+                     fingerprint=f'family-{index}', eco=eco, opening=opening)
+             for index, (eco, opening) in enumerate(openings)]
+    assert storage.import_games(games, owner_user_id=user_id) == (4, 4)
+    families = storage.get_user_openings(user_id, grouping='family')
+    assert [(row['opening'], row['games']) for row in families] == [
+        ('Sicilian Defense', 2), ('French Defense', 1), ('Philidor Defense', 1)]
+    assert families[0]['eco'] == 'B20'
+    variations = storage.get_user_openings(user_id, grouping='variation')
+    assert [row['opening'] for row in variations] == sorted(opening for _, opening in openings)
 
 
 def test_legacy_library_not_claimed_by_new_login(accounts):
