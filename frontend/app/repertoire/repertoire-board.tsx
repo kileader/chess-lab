@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useState } from 'react';
+import { apiFetch } from '../../lib/api-client';
 
 export type RepertoireItem = {
   id: number;
@@ -13,11 +14,10 @@ export type RepertoireItem = {
 type Draft = Omit<RepertoireItem, 'id'>;
 type OpeningStats = { games: number; wins: number; draws: number; losses: number };
 
-const apiBase = process.env.NEXT_PUBLIC_CHESSLAB_API_URL ?? 'http://127.0.0.1:8000';
 const blankDraft: Draft = { context: '', opening: '', status: 'try', note: '' };
 const statusCopy = { keep: 'Keep', practice: 'Practice', try: 'Try it' } as const;
 
-export function RepertoireBoard({ initialItems }: { initialItems: RepertoireItem[] }) {
+export function RepertoireBoard({ initialItems, userId }: { initialItems: RepertoireItem[]; userId: number }) {
   const [items, setItems] = useState(initialItems);
   const [draft, setDraft] = useState<Draft>(blankDraft);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -30,7 +30,7 @@ export function RepertoireBoard({ initialItems }: { initialItems: RepertoireItem
   async function loadStats(currentItems: RepertoireItem[]) {
     const pairs = await Promise.all(currentItems.map(async (item) => {
       try {
-        const response = await fetch(`${apiBase}/api/users/1/openings/detail?family=${encodeURIComponent(item.opening)}`);
+        const response = await apiFetch(`/api/users/${userId}/openings/detail?family=${encodeURIComponent(item.opening)}`);
         if (!response.ok) return [item.id, null] as const;
         const detail = await response.json() as OpeningStats;
         return [item.id, detail] as const;
@@ -68,7 +68,7 @@ export function RepertoireBoard({ initialItems }: { initialItems: RepertoireItem
     setMessage(null);
     try {
       if (editingId === null) {
-        const response = await fetch(`${apiBase}/api/users/1/repertoire`, {
+        const response = await apiFetch(`/api/users/${userId}/repertoire`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify([draft]),
         });
         if (!response.ok) throw new Error();
@@ -76,7 +76,7 @@ export function RepertoireBoard({ initialItems }: { initialItems: RepertoireItem
         setItems(saved);
         void loadStats(saved);
       } else {
-        const response = await fetch(`${apiBase}/api/users/1/repertoire/${editingId}`, {
+        const response = await apiFetch(`/api/users/${userId}/repertoire/${editingId}`, {
           method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draft),
         });
         if (!response.ok) throw new Error();
@@ -99,7 +99,7 @@ export function RepertoireBoard({ initialItems }: { initialItems: RepertoireItem
     setSaving(true);
     setMessage(null);
     try {
-      const response = await fetch(`${apiBase}/api/users/1/repertoire/${itemId}`, { method: 'DELETE' });
+      const response = await apiFetch(`/api/users/${userId}/repertoire/${itemId}`, { method: 'DELETE' });
       if (!response.ok) throw new Error();
       setItems((current) => current.filter((item) => item.id !== itemId));
       if (editingId === itemId) cancelEdit();

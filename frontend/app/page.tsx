@@ -1,3 +1,9 @@
+import { requireAccount, serverApi } from '../lib/api-server';
+import { AccountMenu } from './account-menu';
+import { safeGameLink } from '../lib/safe-link';
+
+export const dynamic = 'force-dynamic';
+
 type OpeningOverview = {
   eco: string | null;
   opening: string;
@@ -5,6 +11,7 @@ type OpeningOverview = {
   wins: number;
   draws: number;
   losses: number;
+  moves: string[];
 };
 
 type UserOverview = {
@@ -60,6 +67,7 @@ type AdjustedOpening = {
   confidence_low: number;
   confidence_high: number;
   reliability: 'limited' | 'reliable';
+  moves: string[];
 };
 
 type TacticsOverview = { sample_size: number; patterns: Array<{ pattern: string; count: number; examples: Array<{ source_url: string | null; white: string | null; black: string | null; move: string | null; best_move: string | null }> }> };
@@ -75,7 +83,6 @@ type PageProps = {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 };
 
-const apiBase = process.env.CHESSLAB_API_URL ?? 'http://127.0.0.1:8000';
 
 async function loadOverview(
   filters: AnalysisFilters,
@@ -88,7 +95,7 @@ async function loadOverview(
     if (filters.color) query.set('color', filters.color);
     query.set('grouping', filters.grouping);
     query.set('opening_limit', String(openingLimit));
-    const response = await fetch(`${apiBase}/api/users/1/overview?${query}`, {
+    const response = await serverApi(`/api/me/overview?${query}`, {
       cache: 'no-store',
     });
     if (!response.ok) return null;
@@ -100,7 +107,7 @@ async function loadOverview(
 
 async function loadRecentGames(): Promise<GameSummary[]> {
   try {
-    const response = await fetch(`${apiBase}/api/games?limit=8&offset=0`, {
+    const response = await serverApi('/api/games?limit=8&offset=0', {
       cache: 'no-store',
     });
     if (!response.ok) return [];
@@ -118,7 +125,7 @@ async function loadFirstMoveResponses(filters: AnalysisFilters): Promise<FirstMo
     if (filters.date_from) query.set('date_from', filters.date_from);
     if (filters.date_to) query.set('date_to', filters.date_to);
     if (filters.color) query.set('color', filters.color);
-    const response = await fetch(`${apiBase}/api/users/1/responses?${query}`, { cache: 'no-store' });
+    const response = await serverApi(`/api/me/responses?${query}`, { cache: 'no-store' });
     return response.ok ? response.json() as Promise<FirstMoveResponse[]> : [];
   } catch {
     return [];
@@ -131,7 +138,7 @@ async function loadTactics(filters: AnalysisFilters): Promise<TacticsOverview | 
     if (filters.date_from) query.set('date_from', filters.date_from);
     if (filters.date_to) query.set('date_to', filters.date_to);
     if (filters.color) query.set('color', filters.color);
-    const response = await fetch(`${apiBase}/api/users/1/tactics?${query}`, { cache: 'no-store' });
+    const response = await serverApi(`/api/me/tactics?${query}`, { cache: 'no-store' });
     return response.ok ? response.json() as Promise<TacticsOverview> : null;
   } catch { return null; }
 }
@@ -142,13 +149,22 @@ async function loadAdjustedOpenings(filters: AnalysisFilters): Promise<AdjustedO
     if (filters.date_from) query.set('date_from', filters.date_from);
     if (filters.date_to) query.set('date_to', filters.date_to);
     if (filters.color) query.set('color', filters.color);
-    const response = await fetch(`${apiBase}/api/users/1/openings/adjusted?${query}`, { cache: 'no-store' });
+    const response = await serverApi(`/api/me/openings/adjusted?${query}`, { cache: 'no-store' });
     return response.ok ? response.json() as Promise<AdjustedOpening[]> : [];
   } catch { return []; }
 }
 
 function scorePercent(wins: number, draws: number, games: number) {
   return games ? ((wins + draws / 2) / games) * 100 : 0;
+}
+
+function formatOpeningMoves(moves: string[]) {
+  const pairs: string[] = [];
+  for (let index = 0; index < moves.length; index += 2) {
+    const moveNumber = index / 2 + 1;
+    pairs.push(`${moveNumber}. ${moves[index]}${moves[index + 1] ? ` ${moves[index + 1]}` : ''}`);
+  }
+  return pairs.join(' ');
 }
 
 function formatDate(value: string | null) {
@@ -188,6 +204,7 @@ function comparisonPeriod(startValue: string | undefined, endValue: string | nul
 }
 
 export default async function Home({ searchParams }: PageProps) {
+  await requireAccount();
   const params = await searchParams;
   const ninetyDaysAgo = new Date();
   ninetyDaysAgo.setUTCDate(ninetyDaysAgo.getUTCDate() - 90);
@@ -216,7 +233,7 @@ export default async function Home({ searchParams }: PageProps) {
           <div className="brand-mark" aria-hidden="true">CL</div>
           <p className="eyebrow">Chess Lab</p>
           <h1>Your chess data is waiting.</h1>
-          <p>Start the local Chess Lab API, then refresh this page to load your dashboard.</p>
+          <p>Your analysis service is unavailable right now. Please refresh in a moment.</p>
         </section>
       </main>
     );
@@ -271,6 +288,20 @@ export default async function Home({ searchParams }: PageProps) {
       : null;
     return { ...opening, currentScore, prior, priorScore, change: priorScore === null ? null : currentScore - priorScore };
   });
+  const repertoireAnchor = comparisonOpenings[0] ?? null;
+  const sharpestEdge = [...adjustedOpenings]
+    .filter((opening) => opening.games >= 12)
+    .sort((left, right) => right.actual_score - left.actual_score || right.games - left.games)[0] ?? null;
+  const sharpestEdgeRelationship = sharpestEdge?.color === 'black'
+    ? 'as Black with'
+    : sharpestEdge && /\bDefense\b/i.test(sharpestEdge.opening)
+      ? 'as White against'
+      : 'as White in';
+  const colorScope = filters.color === 'white'
+    ? ' as White'
+    : filters.color === 'black'
+      ? ' as Black'
+      : '';
   const practiceTargets = comparisonOpenings
     .filter((opening) => opening.games >= 12 && (
       opening.currentScore < 45 || (opening.prior && opening.prior.games >= 8 && (opening.change ?? 0) <= -5)
@@ -307,7 +338,7 @@ export default async function Home({ searchParams }: PageProps) {
         <div className="profile-pill">
           <span className="status-dot" />
           <span>{identity?.username ?? overview.user.display_name}</span>
-          <small>{identity?.platform.replace('_', '.') ?? 'local'}</small>
+          <small>{identity?.platform.replace('_', '.') ?? 'local'}</small><AccountMenu />
         </div>
       </header>
 
@@ -391,8 +422,7 @@ export default async function Home({ searchParams }: PageProps) {
                 <p className="eyebrow">Practice now</p>
                 {practiceTargets.length ? practiceTargets.map((opening) => (
                   <a className="practice-row" href={`/openings/${encodeURIComponent(opening.opening)}${detailQuery.size ? `?${detailQuery}` : ''}`} key={opening.opening}>
-                    <span className="eco-badge">{opening.eco ?? '—'}</span>
-                    <span><strong>{opening.opening}</strong><small>{opening.games} games · {opening.currentScore.toFixed(1)}% score</small></span>
+                    <span><strong>{opening.opening}</strong><small className="opening-moves">{formatOpeningMoves(opening.moves)}</small><small>{opening.games} games · {opening.currentScore.toFixed(1)}% score</small></span>
                     <b className="trend-down">{practiceReason(opening)}</b>
                   </a>
                 )) : <p className="practice-empty">No opening family has both a meaningful sample and a clear concern signal in this period.</p>}
@@ -400,9 +430,8 @@ export default async function Home({ searchParams }: PageProps) {
               {dropTargets.length > 0 && <div className="practice-column practice-drop">
                 <p className="eyebrow">Openings you could replace</p>
                 {dropTargets.map((opening) => (
-                    <a className="practice-row" href={`/openings/${encodeURIComponent(opening.opening)}${detailQuery.size ? `?${detailQuery}` : ''}`} key={opening.opening}>
-                      <span className="eco-badge">{opening.eco ?? '—'}</span>
-                      <span><strong>{opening.opening}</strong><small>{opening.games} games · {opening.currentScore.toFixed(1)}% score{opening.priorScore === null ? '' : ` · ${opening.priorScore.toFixed(1)}% prior`}</small></span>
+                  <a className="practice-row" href={`/openings/${encodeURIComponent(opening.opening)}${detailQuery.size ? `?${detailQuery}` : ''}`} key={opening.opening}>
+                      <span><strong>{opening.opening}</strong><small className="opening-moves">{formatOpeningMoves(opening.moves)}</small><small>{opening.games} games · {opening.currentScore.toFixed(1)}% score{opening.priorScore === null ? '' : ` · ${opening.priorScore.toFixed(1)}% prior`}</small></span>
                       <b className="trend-down">See details</b>
                     </a>
                   ))}
@@ -429,13 +458,13 @@ export default async function Home({ searchParams }: PageProps) {
                   <a
                     className="opening-row"
                     href={`/openings/${encodeURIComponent(family)}${detailQuery.size ? `?${detailQuery}` : ''}`}
-                    key={`${opening.eco}-${opening.opening}`}
+                    key={opening.opening}
                     aria-label={`Analyze ${family}`}
                   >
                     <span className="opening-rank">{String(index + 1).padStart(2, '0')}</span>
-                    <span className="eco-badge">{opening.eco ?? '—'}</span>
                     <div className="opening-name">
                       <strong>{opening.opening}</strong>
+                      <span className="opening-moves">{formatOpeningMoves(opening.moves)}</span>
                       <span>{opening.games} games · {opening.wins}W {opening.draws}D {opening.losses}L</span>
                     </div>
                     <div className="score-cell">
@@ -453,17 +482,23 @@ export default async function Home({ searchParams }: PageProps) {
           <aside className="insight-stack">
             <article className="panel insight-card insight-dark">
               <p className="eyebrow">Repertoire anchor</p>
-              <h2>Caro-Kann</h2>
-              <p>Your most familiar defensive structure, with 1,376 games as Black across the family.</p>
+              <h2>{repertoireAnchor?.opening ?? 'No classified games'}</h2>
+              {repertoireAnchor?.moves.length ? <p className="insight-moves">{formatOpeningMoves(repertoireAnchor.moves)}</p> : null}
+              <p>{repertoireAnchor
+                ? `Your most-played opening family${colorScope} in this period, with ${repertoireAnchor.games.toLocaleString()} games.`
+                : 'No opening family is available for the selected scope.'}</p>
               <div className="mini-board" aria-hidden="true">
                 {Array.from({ length: 16 }, (_, index) => <span key={index} />)}
               </div>
             </article>
             <article className="panel insight-card">
-              <p className="eyebrow">Sharpest edge</p>
-              <h2>Fried Liver Attack</h2>
-              <strong className="insight-number">72.9%</strong>
-              <p>Score across 133 games—your clearest high-performing tactical line.</p>
+              <p className="eyebrow">{sharpestEdge?.color === 'white' ? 'Best matchup as White' : sharpestEdge ? 'Best result as Black' : 'Best result'}</p>
+              <h2>{sharpestEdge?.opening ?? 'Sample too small'}</h2>
+              {sharpestEdge?.moves.length ? <p className="insight-moves">{formatOpeningMoves(sharpestEdge.moves)}</p> : null}
+              {sharpestEdge && <strong className="insight-number">{(sharpestEdge.actual_score * 100).toFixed(1)}%</strong>}
+              <p>{sharpestEdge
+                ? `Your highest-scoring result ${sharpestEdgeRelationship} this family, across ${sharpestEdge.games.toLocaleString()} games in this period.`
+                : 'No opening family has reached the 12-game minimum in the selected scope.'}</p>
             </article>
           </aside>
         </section>
@@ -485,7 +520,7 @@ export default async function Home({ searchParams }: PageProps) {
                 const drew = game.result === '1/2-1/2';
                 const outcome = drew ? 'Draw' : won ? 'Win' : 'Loss';
                 return (
-                  <a className="game-row" href={game.source_url ?? '#'} key={`${game.source_url}-${index}`} target={game.source_url ? '_blank' : undefined}>
+                  <a className="game-row" href={safeGameLink(game.source_url)} key={`${game.source_url}-${index}`} target={game.source_url ? '_blank' : undefined} rel="noreferrer">
                     <span className={`outcome outcome-${outcome.toLowerCase()}`}>{outcome[0]}</span>
                     <div className="matchup">
                       <strong>{game.white ?? 'Unknown'} <i>vs</i> {game.black ?? 'Unknown'}</strong>
@@ -508,7 +543,7 @@ export default async function Home({ searchParams }: PageProps) {
         </section>
 
         <footer>
-          <span>Chess Lab · Local analysis</span>
+          <span>Chess Lab · Private analysis</span>
           <span>{overview.user.display_name}&apos;s archive</span>
         </footer>
       </div>
@@ -520,8 +555,7 @@ function AdjustedOpeningRow({ opening, detailQuery }: { opening: AdjustedOpening
   const adjustment = opening.adjusted_score * 100;
   const interval = `${(opening.confidence_low * 100).toFixed(1)} to ${(opening.confidence_high * 100).toFixed(1)} pts`;
   return <a className="adjusted-row" href={`/openings/${encodeURIComponent(opening.opening)}${detailQuery.size ? `?${detailQuery}` : ''}`}>
-    <span className="eco-badge">{opening.eco ?? '—'}</span>
-    <span><strong>{opening.opening}</strong><small>As {opening.color === 'white' ? 'White' : 'Black'} · {opening.games} games · {opening.reliability} sample</small></span>
+    <span><strong>{opening.opening}</strong><small className="opening-moves">{formatOpeningMoves(opening.moves)}</small><small>As {opening.color === 'white' ? 'White' : 'Black'} · {opening.games} games · {opening.reliability} sample</small></span>
     <span className={adjustment > 0 ? 'adjusted-positive' : 'adjusted-negative'}><b>{adjustment > 0 ? '+' : ''}{adjustment.toFixed(1)} pts</b><small>{(opening.actual_score * 100).toFixed(1)}% actual vs {(opening.expected_score * 100).toFixed(1)}% expected · 95%: {interval}</small></span>
   </a>;
 }

@@ -1,10 +1,14 @@
 import { RepertoireBoard, type RepertoireItem } from './repertoire-board';
+import { PracticePositions } from './practice-positions';
+import type { PracticePosition } from '../practice-position';
+import { requireAccount, serverApi } from '../../lib/api-server';
+import { AccountMenu } from '../account-menu';
 
-const apiBase = process.env.CHESSLAB_API_URL ?? 'http://127.0.0.1:8000';
+export const dynamic = 'force-dynamic';
 
 async function loadRepertoire(): Promise<RepertoireItem[] | null> {
   try {
-    const response = await fetch(`${apiBase}/api/users/1/repertoire`, {
+    const response = await serverApi('/api/me/repertoire', {
       cache: 'no-store',
     });
     if (!response.ok) return null;
@@ -15,7 +19,13 @@ async function loadRepertoire(): Promise<RepertoireItem[] | null> {
 }
 
 export default async function RepertoirePage() {
-  const items = await loadRepertoire();
+  const account = await requireAccount();
+  const [items, positions] = await Promise.all([
+    loadRepertoire(),
+    serverApi('/api/me/practice-positions', { cache: 'no-store' })
+      .then((response) => response.ok ? response.json() as Promise<PracticePosition[]> : null)
+      .catch(() => null),
+  ]);
 
   return (
     <main className="app-shell">
@@ -31,7 +41,7 @@ export default async function RepertoirePage() {
           <a href="/#games">Games</a>
           <a href="/#upload">Import</a>
         </nav>
-        <div className="profile-pill"><span className="status-dot" /><span>Local plan</span></div>
+        <div className="profile-pill"><span className="status-dot" /><span>{account.display_name}</span><AccountMenu /></div>
       </header>
 
       <div className="detail-shell repertoire-shell">
@@ -42,9 +52,11 @@ export default async function RepertoirePage() {
           <p>Keep a short list of ideas you actually want to test. Chess Lab brings your real game record into the picture, but the choices stay yours.</p>
         </section>
 
+        {positions === null ? <section className="panel repertoire-empty"><h2>Practice positions are unavailable right now.</h2><p>Please refresh in a moment.</p></section> : <PracticePositions initialItems={positions} userId={account.id} />}
+
         {items === null ? (
-          <section className="panel repertoire-empty"><h2>Your plan is unavailable right now.</h2><p>Start the local Chess Lab API, then refresh this page.</p></section>
-        ) : <RepertoireBoard initialItems={items} />}
+          <section className="panel repertoire-empty"><h2>Your plan is unavailable right now.</h2><p>Please refresh in a moment.</p></section>
+        ) : <RepertoireBoard initialItems={items} userId={account.id} />}
       </div>
     </main>
   );

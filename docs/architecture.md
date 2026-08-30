@@ -4,6 +4,11 @@
 
 Accepted as the intended direction. This document does not configure or perform a deployment.
 
+The private-beta implementation and required provider setup are documented in
+[hosting-beta.md](hosting-beta.md). Google sign-in uses Supabase Auth; application
+data stays in Railway PostgreSQL. Deployment and real OAuth verification remain
+separate launch gates, not something a successful local build proves.
+
 ## Deployment boundary
 
 Chess Lab will be split into two deployable applications while keeping one repository:

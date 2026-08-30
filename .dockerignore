@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!requirements.txt
+!backend/**
+!chesslab/**
+!migrations/**
+!data/openings/**
+**/__pycache__/**

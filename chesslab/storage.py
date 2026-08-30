@@ -1,6 +1,7 @@
 """SQLite persistence for structured Chess Lab game records."""
 
 import io
+import json
 import math
 import sqlite3
 from collections.abc import Iterable
@@ -74,6 +75,51 @@ CREATE TABLE IF NOT EXISTS repertoire_items (
 )
 """
 
+CREATE_PRACTICE_POSITIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS practice_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    position_key TEXT NOT NULL,
+    fen TEXT NOT NULL,
+    family TEXT NOT NULL,
+    player_color TEXT NOT NULL CHECK(player_color IN ('white', 'black')),
+    line TEXT NOT NULL,
+    san_path TEXT NOT NULL,
+    date_from TEXT,
+    date_to TEXT,
+    note TEXT NOT NULL DEFAULT '',
+    candidate_move TEXT NOT NULL DEFAULT '',
+    examples TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, position_key, player_color)
+)
+"""
+
+CREATE_ACCOUNTS_TABLE = """
+CREATE TABLE IF NOT EXISTS accounts (
+    subject TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE
+)
+"""
+
+CREATE_ACCOUNT_IDENTITIES_TABLE = """
+CREATE TABLE IF NOT EXISTS account_player_identities (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    platform TEXT NOT NULL CHECK(platform IN ('lichess', 'chess_com')),
+    username TEXT NOT NULL,
+    username_normalized TEXT NOT NULL,
+    PRIMARY KEY (user_id, platform)
+)
+"""
+
+OWNED_GAME_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS games_owned_source_identity ON games "
+    "(COALESCE(owner_user_id, 0), source, source_game_id) WHERE source_game_id IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS games_owned_fingerprint ON games "
+    "(COALESCE(owner_user_id, 0), fingerprint) WHERE fingerprint IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS games_owner ON games(owner_user_id, id)",
+)
+
 MIGRATION_COLUMNS = {
     "opening_ply": "INTEGER",
     "site": "TEXT",
@@ -125,18 +171,20 @@ class SQLiteGameStorage:
                 connection.execute(
                     f"ALTER TABLE games ADD COLUMN {column} {definition}"
                 )
-        connection.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS games_source_identity "
-            "ON games(source, source_game_id) WHERE source_game_id IS NOT NULL"
-        )
-        connection.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS games_fingerprint "
-            "ON games(fingerprint) WHERE fingerprint IS NOT NULL"
-        )
         connection.execute(CREATE_USERS_TABLE)
+        if "owner_user_id" not in existing_columns:
+            connection.execute("ALTER TABLE games ADD COLUMN owner_user_id INTEGER REFERENCES users(id)")
+        # Build replacement indexes before dropping the old global constraints.
+        for statement in OWNED_GAME_INDEXES:
+            connection.execute(statement)
+        connection.execute("DROP INDEX IF EXISTS games_source_identity")
+        connection.execute("DROP INDEX IF EXISTS games_fingerprint")
         connection.execute(CREATE_PLAYER_IDENTITIES_TABLE)
         connection.execute(CREATE_USER_GAMES_TABLE)
         connection.execute(CREATE_REPERTOIRE_ITEMS_TABLE)
+        connection.execute(CREATE_PRACTICE_POSITIONS_TABLE)
+        connection.execute(CREATE_ACCOUNTS_TABLE)
+        connection.execute(CREATE_ACCOUNT_IDENTITIES_TABLE)
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_repertoire_items_user_context "
             "ON repertoire_items(user_id, context)"
@@ -149,7 +197,7 @@ class SQLiteGameStorage:
         """Associate games with matching platform identities without changing games."""
         connection.execute(
             """
-            INSERT OR IGNORE INTO user_games (user_id, game_id, player_color)
+            INSERT INTO user_games (user_id, game_id, player_color)
             SELECT
                 identity.user_id,
                 game.id,
@@ -159,8 +207,11 @@ class SQLiteGameStorage:
                 END
             FROM player_identities AS identity
             JOIN games AS game ON game.source = identity.platform
-            WHERE LOWER(game.white) = identity.username_normalized
-               OR LOWER(game.black) = identity.username_normalized
+            WHERE game.owner_user_id IS NULL
+              AND NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.user_id = identity.user_id)
+              AND (LOWER(game.white) = identity.username_normalized
+               OR LOWER(game.black) = identity.username_normalized)
+            ON CONFLICT DO NOTHING
             """
         )
 
@@ -169,22 +220,33 @@ class SQLiteGameStorage:
         _, games_added = self.import_games(games)
         return games_added
 
-    def import_games(self, games: Iterable[GameRecord]) -> tuple[int, int]:
+    def import_games(self, games: Iterable[GameRecord], *, owner_user_id: int | None = None) -> tuple[int, int]:
         """Stream games through one transaction and return received/added counts."""
         placeholders = ", ".join("?" for _ in GAME_COLUMNS)
         columns = ", ".join(GAME_COLUMNS)
-        insert_query = f"INSERT OR IGNORE INTO games ({columns}) VALUES ({placeholders})"
+        insert_query = f"INSERT INTO games ({columns}, owner_user_id) VALUES ({placeholders}, ?) ON CONFLICT DO NOTHING"
         games_received = 0
         games_added = 0
 
         with self._connect() as connection:
             for game in games:
                 game_row = tuple(getattr(game, column) for column in GAME_COLUMNS)
-                changes_before = connection.total_changes
-                connection.execute(insert_query, game_row)
+                cursor = connection.execute(insert_query, (*game_row, owner_user_id))
                 games_received += 1
-                games_added += connection.total_changes - changes_before
-            self._link_games_to_identities(connection)
+                games_added += cursor.rowcount
+            if owner_user_id is None:
+                self._link_games_to_identities(connection)
+            else:
+                connection.execute("""
+                    INSERT INTO user_games (user_id, game_id, player_color)
+                    SELECT identity.user_id, game.id,
+                        CASE WHEN LOWER(game.white) = identity.username_normalized THEN 'white' ELSE 'black' END
+                    FROM account_player_identities AS identity
+                    JOIN games AS game ON game.owner_user_id = identity.user_id AND game.source = identity.platform
+                    WHERE identity.user_id = ? AND (LOWER(game.white) = identity.username_normalized
+                        OR LOWER(game.black) = identity.username_normalized)
+                    ON CONFLICT DO NOTHING
+                """, (owner_user_id,))
 
         return games_received, games_added
 
@@ -212,10 +274,10 @@ class SQLiteGameStorage:
                 user_id = int(existing["user_id"])
             else:
                 cursor = connection.execute(
-                    "INSERT INTO users (display_name) VALUES (?)",
+                    "INSERT INTO users (display_name) VALUES (?) RETURNING id",
                     (display_name.strip(),),
                 )
-                user_id = int(cursor.lastrowid)
+                user_id = int(cursor.fetchone()["id"])
                 connection.execute(
                     """
                     INSERT INTO player_identities
@@ -228,6 +290,35 @@ class SQLiteGameStorage:
 
         return user_id
 
+    def get_account_user(self, subject: str) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT user_id FROM accounts WHERE subject = ?", (subject,)).fetchone()
+        return int(row["user_id"]) if row else None
+
+    def ensure_account(self, subject: str) -> int:
+        """Provision by verified auth subject, never by email or chess handle."""
+        with self._connect() as connection:
+            existing = connection.execute("SELECT user_id FROM accounts WHERE subject = ?", (subject,)).fetchone()
+            if existing:
+                return int(existing["user_id"])
+            row = connection.execute("INSERT INTO users (display_name) VALUES (?) RETURNING id", ("Chess player",)).fetchone()
+            user_id = int(row["id"])
+            inserted = connection.execute("INSERT INTO accounts(subject, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING", (subject, user_id))
+            if inserted.rowcount == 0:
+                connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            result = connection.execute("SELECT user_id FROM accounts WHERE subject = ?", (subject,)).fetchone()
+        return int(result["user_id"])
+
+    def configure_account(self, user_id: int, display_name: str, platform: str, username: str) -> None:
+        """Set an analysis identity; it grants access only to this account's imports."""
+        with self._connect() as connection:
+            existing = connection.execute("SELECT platform, username_normalized FROM account_player_identities WHERE user_id = ?", (user_id,)).fetchone()
+            if existing and (existing["platform"] != platform or existing["username_normalized"] != username.casefold()):
+                raise ValueError("Your chess identity is already set. Contact the beta owner to change it.")
+            connection.execute("UPDATE users SET display_name = ? WHERE id = ?", (display_name, user_id))
+            connection.execute("""INSERT INTO account_player_identities (user_id, platform, username, username_normalized)
+                VALUES (?, ?, ?, ?) ON CONFLICT(user_id, platform) DO NOTHING""", (user_id, platform, username, username.casefold()))
+
     def get_user_profile(self, user_id: int) -> dict[str, object] | None:
         """Return one user and all linked platform identities."""
         with self._connect() as connection:
@@ -239,10 +330,11 @@ class SQLiteGameStorage:
                 return None
             identities = connection.execute(
                 """
-                SELECT platform, username FROM player_identities
-                WHERE user_id = ? ORDER BY id
+                SELECT platform, username FROM player_identities WHERE user_id = ?
+                UNION ALL
+                SELECT platform, username FROM account_player_identities WHERE user_id = ?
                 """,
-                (user_id,),
+                (user_id, user_id),
             ).fetchall()
 
         return {
@@ -742,6 +834,80 @@ class SQLiteGameStorage:
             "recent_games": [dict(row) for row in recent_games],
         }
 
+    @staticmethod
+    def _practice_position(row: sqlite3.Row) -> dict[str, object]:
+        position = dict(row)
+        for field in ("line", "san_path", "examples"):
+            position[field] = json.loads(position[field])
+        return position
+
+    def list_practice_positions(self, user_id: int) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM practice_positions WHERE user_id = ? ORDER BY id DESC", (user_id,)
+            ).fetchall()
+        return [self._practice_position(row) for row in rows]
+
+    def get_practice_position(self, user_id: int, position_id: int) -> dict[str, object] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM practice_positions WHERE user_id = ? AND id = ?", (user_id, position_id)
+            ).fetchone()
+        return self._practice_position(row) if row is not None else None
+
+    def save_practice_position(self, user_id: int, position: dict) -> tuple[dict, bool]:
+        """Create a bookmark, preserving existing notes on duplicate saves."""
+        columns = ("position_key", "fen", "family", "player_color", "line", "san_path",
+                   "date_from", "date_to", "note", "candidate_move", "examples")
+        values = [json.dumps(position[key]) if key in {"line", "san_path", "examples"}
+                  else position[key] for key in columns]
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"""INSERT INTO practice_positions (user_id, {', '.join(columns)})
+                VALUES ({', '.join('?' for _ in range(len(columns) + 1))})
+                ON CONFLICT(user_id, position_key, player_color) DO NOTHING""",
+                [user_id, *values],
+            )
+            created = cursor.rowcount == 1
+            row = connection.execute(
+                """SELECT * FROM practice_positions
+                WHERE user_id = ? AND position_key = ? AND player_color = ?""",
+                (user_id, position["position_key"], position["player_color"]),
+            ).fetchone()
+        return self._practice_position(row), created
+
+    def update_practice_position(self, user_id: int, position_id: int, note: str, candidate_move: str) -> dict | None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE practice_positions SET note = ?, candidate_move = ? WHERE user_id = ? AND id = ?",
+                (note, candidate_move, user_id, position_id),
+            )
+        return self.get_practice_position(user_id, position_id)
+
+    def delete_practice_position(self, user_id: int, position_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM practice_positions WHERE user_id = ? AND id = ?", (user_id, position_id)
+            )
+        return cursor.rowcount == 1
+
+    def get_explorer_games(
+        self, user_id: int, *, color: str,
+        date_from: str | None = None, date_to: str | None = None,
+    ) -> list[dict[str, object]]:
+        """Read the scoped archive, including games ultimately classified elsewhere."""
+        where, parameters = self._user_game_filter(
+            user_id, date_from=date_from, date_to=date_to, color=color
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""SELECT game.pgn, game.result, game.date, game.source_url
+                FROM user_games AS link JOIN games AS game ON game.id = link.game_id
+                WHERE {where} ORDER BY game.date DESC, game.id DESC""",
+                parameters,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_opening_reference_game(
         self,
         user_id: int,
@@ -842,25 +1008,34 @@ class SQLiteGameStorage:
 
         return games_updated, games_unclassified
 
-    def count_games(self) -> int:
+    def count_games(self, *, owner_user_id: int | None = None) -> int:
         """Return the number of stored games without loading their records."""
         with self._connect() as connection:
-            row = connection.execute("SELECT COUNT(*) FROM games").fetchone()
-        return int(row[0])
+            query = "SELECT COUNT(*) AS total FROM games"
+            if owner_user_id is not None:
+                row = connection.execute(query + " WHERE owner_user_id = ?", (owner_user_id,)).fetchone()
+            else:
+                row = connection.execute(query).fetchone()
+        return int(row["total"])
 
     def list_games(
         self,
         *,
         limit: int | None = None,
         offset: int = 0,
+        owner_user_id: int | None = None,
     ) -> list[GameRecord]:
         """Return stored games in import order, optionally as a bounded page."""
         columns = ", ".join(GAME_COLUMNS)
-        query = f"SELECT {columns} FROM games ORDER BY id"
+        query = f"SELECT {columns} FROM games"
         parameters: tuple[int, ...] = ()
+        if owner_user_id is not None:
+            query += " WHERE owner_user_id = ?"
+            parameters = (owner_user_id,)
+        query += " ORDER BY id DESC" if owner_user_id is not None else " ORDER BY id"
         if limit is not None:
             query += " LIMIT ? OFFSET ?"
-            parameters = (limit, offset)
+            parameters = (*parameters, limit, offset)
 
         with self._connect() as connection:
             rows = connection.execute(query, parameters).fetchall()

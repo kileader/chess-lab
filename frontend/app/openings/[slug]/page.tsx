@@ -1,4 +1,10 @@
 import type { Metadata } from 'next';
+import { OpeningExplorer, type ExplorerData } from './opening-explorer';
+import { requireAccount, serverApi } from '../../../lib/api-server';
+import { AccountMenu } from '../../account-menu';
+import { safeGameLink } from '../../../lib/safe-link';
+
+export const dynamic = 'force-dynamic';
 
 type ResultBreakdown = {
   games: number;
@@ -10,11 +16,12 @@ type ResultBreakdown = {
 type OpeningDetail = ResultBreakdown & {
   family: string;
   user: {
+    id: number;
     display_name: string;
     identities: Array<{ platform: string; username: string }>;
   };
   colors: Array<ResultBreakdown & { color: 'white' | 'black' }>;
-  variations: Array<ResultBreakdown & { eco: string | null; opening: string }>;
+  variations: Array<ResultBreakdown & { eco: string | null; opening: string; moves: string[] }>;
   years: Array<ResultBreakdown & { year: string }>;
   recent_games: Array<{
     date: string | null;
@@ -47,10 +54,18 @@ type PageProps = {
   params: Promise<{ slug: string }>;
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 };
-const apiBase = process.env.CHESSLAB_API_URL ?? 'http://127.0.0.1:8000';
 
 function score(data: ResultBreakdown) {
   return data.games ? ((data.wins + data.draws / 2) / data.games) * 100 : 0;
+}
+
+function formatOpeningMoves(moves: string[]) {
+  const pairs: string[] = [];
+  for (let index = 0; index < moves.length; index += 2) {
+    const moveNumber = index / 2 + 1;
+    pairs.push(`${moveNumber}. ${moves[index]}${moves[index + 1] ? ` ${moves[index + 1]}` : ''}`);
+  }
+  return pairs.join(' ');
 }
 
 function firstValue(value: string | string[] | undefined) {
@@ -61,8 +76,8 @@ async function loadDetail(family: string, filters: URLSearchParams): Promise<Ope
   try {
     const query = new URLSearchParams(filters);
     query.set('family', family);
-    const response = await fetch(
-      `${apiBase}/api/users/1/openings/detail?${query}`,
+    const response = await serverApi(
+      `/api/me/openings/detail?${query}`,
       { cache: 'no-store' },
     );
     if (!response.ok) return null;
@@ -76,7 +91,7 @@ async function loadTheory(family: string, filters: URLSearchParams): Promise<Ope
   try {
     const query = new URLSearchParams(filters);
     query.set('family', family);
-    const response = await fetch(`${apiBase}/api/users/1/openings/theory?${query}`, { cache: 'no-store' });
+    const response = await serverApi(`/api/me/openings/theory?${query}`, { cache: 'no-store' });
     if (!response.ok) return null;
     return response.json() as Promise<OpeningTheory>;
   } catch {
@@ -88,7 +103,7 @@ async function loadReviews(family: string, filters: URLSearchParams): Promise<Op
   try {
     const query = new URLSearchParams(filters);
     query.set('family', family);
-    const response = await fetch(`${apiBase}/api/users/1/openings/review?${query}`, { cache: 'no-store' });
+    const response = await serverApi(`/api/me/openings/review?${query}`, { cache: 'no-store' });
     return response.ok ? response.json() as Promise<OpeningReview[]> : [];
   } catch { return []; }
 }
@@ -97,7 +112,7 @@ async function loadPractice(family: string, filters: URLSearchParams): Promise<O
   try {
     const query = new URLSearchParams(filters);
     query.set('family', family);
-    const response = await fetch(`${apiBase}/api/users/1/openings/practice?${query}`, { cache: 'no-store' });
+    const response = await serverApi(`/api/me/openings/practice?${query}`, { cache: 'no-store' });
     return response.ok ? response.json() as Promise<OpeningPractice> : null;
   } catch { return null; }
 }
@@ -114,6 +129,7 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
 }
 
 export default async function OpeningPage({ params, searchParams }: PageProps) {
+  await requireAccount();
   const { slug } = await params;
   const family = decodeURIComponent(slug);
   const rawSearchParams = await searchParams;
@@ -146,6 +162,18 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
 
   const white = detail.colors.find((item) => item.color === 'white');
   const black = detail.colors.find((item) => item.color === 'black');
+  const explorerColor = color === 'white' || color === 'black'
+    ? color : (black?.games ?? 0) > (white?.games ?? 0) ? 'black' : 'white';
+  const explorerQuery = new URLSearchParams(filters);
+  explorerQuery.set('family', family);
+  explorerQuery.set('color', explorerColor);
+  const initialLine = firstValue(rawSearchParams.line)?.split(',').filter(Boolean) ?? [];
+  if (initialLine.length) explorerQuery.set('line', initialLine.join(','));
+  let explorer: ExplorerData | null = null;
+  try {
+    const response = await serverApi(`/api/me/openings/explorer?${explorerQuery}`, { cache: 'no-store' });
+    if (response.ok) explorer = await response.json() as ExplorerData;
+  } catch { /* Keep the rest of the opening detail available. */ }
   const identity = detail.user.identities[0];
   const losses = detail.recent_games.filter((game) => (
     (game.player_color === 'white' && game.result === '0-1')
@@ -169,7 +197,7 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
         <div className="profile-pill">
           <span className="status-dot" />
           <span>{identity?.username ?? detail.user.display_name}</span>
-          <small>{identity?.platform.replace('_', '.') ?? 'local'}</small>
+          <small>{identity?.platform.replace('_', '.') ?? 'local'}</small><AccountMenu />
         </div>
       </header>
 
@@ -195,6 +223,8 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
           </article>
         </section>
 
+        <OpeningExplorer key={`${family}-${explorerColor}-${dateFrom}-${dateTo}-${initialLine.join(',')}`} initialData={explorer} family={family} userId={detail.user.id} dateFrom={dateFrom} dateTo={dateTo} initialColor={explorerColor} initialLine={initialLine} />
+
         {theory && <section className="theory-panel panel">
           <p className="eyebrow">Engine check</p>
           <div><strong>Engine says: {theory.verdict}</strong><span>Based on your most-played line: {theory.reference_opening}</span></div>
@@ -210,9 +240,8 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
             <div className="panel-heading"><div><p className="eyebrow">Inside the family</p><h2>Variations</h2></div><span className="panel-note">Sorted by games played</span></div>
             <div>
               {detail.variations.map((variation) => (
-                <div className="variation-row" key={`${variation.eco}-${variation.opening}`}>
-                  <span className="eco-badge">{variation.eco ?? '—'}</span>
-                  <span className="variation-name">{variation.opening}</span>
+                <div className="variation-row" key={variation.opening}>
+                  <span className="variation-name">{variation.opening}<small className="opening-moves">{formatOpeningMoves(variation.moves)}</small></span>
                   <span className="variation-meta">{variation.games} games</span>
                   <span className="variation-meta">{score(variation).toFixed(1)}%</span>
                 </div>
@@ -243,7 +272,7 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
               const outcome = drew ? 'Draw' : won ? 'Win' : 'Loss';
               const review = reviewByUrl.get(game.source_url);
               return (
-                <a className="game-row" href={game.source_url ?? '#'} key={`${game.source_url}-${index}`} target={game.source_url ? '_blank' : undefined}>
+                <a className="game-row" href={safeGameLink(game.source_url)} key={`${game.source_url}-${index}`} target={game.source_url ? '_blank' : undefined} rel="noreferrer">
                   <span className={`outcome outcome-${outcome.toLowerCase()}`}>{outcome[0]}</span>
                   <div className="matchup"><strong>{game.white ?? 'Unknown'} <i>vs</i> {game.black ?? 'Unknown'}</strong><span>{review?.move ? `Check move ${review.move_number}: ${review.move} lost about ${(review.centipawns_lost! / 100).toFixed(1)} pawns` : game.opening ?? detail.family}</span></div>
                   <span className="game-meta">{game.time_control ?? '—'}</span><span className="game-meta">{game.date ?? '—'}</span>

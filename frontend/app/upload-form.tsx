@@ -2,6 +2,8 @@
 
 import { useRouter } from 'next/navigation';
 import { FormEvent, useState } from 'react';
+import { apiFetch } from '../lib/api-client';
+import { practiceError } from './practice-position';
 
 type ImportSummary = {
   games_received: number;
@@ -9,7 +11,6 @@ type ImportSummary = {
   duplicates_skipped: number;
 };
 
-const apiBase = process.env.NEXT_PUBLIC_CHESSLAB_API_URL ?? 'http://127.0.0.1:8000';
 
 export function UploadForm() {
   const router = useRouter();
@@ -29,11 +30,11 @@ export function UploadForm() {
     body.append('file', file);
 
     try {
-      const response = await fetch(`${apiBase}/api/games/import`, {
+      const response = await apiFetch('/api/games/import', {
         method: 'POST',
         body,
       });
-      if (!response.ok) throw new Error('The archive could not be imported.');
+      if (!response.ok) throw new Error(await practiceError(response, 'The archive could not be imported.'));
       setSummary(await response.json() as ImportSummary);
       router.refresh();
     } catch (uploadError) {
@@ -56,6 +57,7 @@ export function UploadForm() {
       <button disabled={!file || isUploading} type="submit">
         {isUploading ? 'Importing…' : 'Import games'}
       </button>
+      <small>Private to your account. Up to 10 MB and 5,000 games per import.</small>
       {summary && (
         <p className="upload-result" role="status">
           {summary.games_added.toLocaleString()} added · {summary.duplicates_skipped.toLocaleString()} already present
