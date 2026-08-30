@@ -4,6 +4,7 @@ import os
 from io import TextIOWrapper
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,7 +15,7 @@ from chesslab.importer import iter_game_records
 from chesslab.models import GameRecord
 from chesslab.openings import OpeningCatalog
 from chesslab.storage import SQLiteGameStorage
-from chesslab.theory import assess_pgn_opening, first_major_mistake
+from chesslab.theory import assess_pgn_opening, first_major_mistake, opening_move_path
 
 
 class ImportResponse(BaseModel):
@@ -88,6 +89,21 @@ class OpeningOverview(BaseModel):
     wins: int
     draws: int
     losses: int
+
+
+class AdjustedOpening(BaseModel):
+    """An opening score normalized for the ratings faced in its games."""
+
+    eco: str | None
+    opening: str
+    color: Literal["white", "black"]
+    games: int
+    actual_score: float
+    expected_score: float
+    adjusted_score: float
+    confidence_low: float
+    confidence_high: float
+    reliability: Literal["limited", "reliable"]
 
 
 class UserOverview(BaseModel):
@@ -174,6 +190,32 @@ class OpeningReview(BaseModel):
     move: str | None
     move_number: int | None
     centipawns_lost: int | None
+
+
+class TacticExample(BaseModel):
+    date: str | None
+    white: str | None
+    black: str | None
+    source_url: str | None
+    move: str | None
+    best_move: str | None
+
+
+class TacticPattern(BaseModel):
+    pattern: str
+    count: int
+    examples: list[TacticExample]
+
+
+class TacticsOverview(BaseModel):
+    sample_size: int
+    patterns: list[TacticPattern]
+
+
+class OpeningPractice(BaseModel):
+    reference_opening: str
+    moves: list[str]
+    lichess_url: str
 
 
 class RepertoireItemInput(BaseModel):
@@ -369,6 +411,34 @@ def user_overview(
     return UserOverview.model_validate(overview)
 
 
+@app.get("/api/users/{user_id}/openings/adjusted", response_model=list[AdjustedOpening])
+def user_adjusted_openings(
+    user_id: int,
+    storage: StorageDependency,
+    date_from: Annotated[str | None, Query(pattern=r"^\d{4}\.\d{2}\.\d{2}$")] = None,
+    date_to: Annotated[str | None, Query(pattern=r"^\d{4}\.\d{2}\.\d{2}$")] = None,
+    color: Literal["white", "black"] | None = None,
+    grouping: Literal["family", "variation"] = "family",
+    min_games: Annotated[int, Query(ge=2, le=100)] = 8,
+) -> list[AdjustedOpening]:
+    """Compare actual opening score with Elo-based expected score.
+
+    This is descriptive, not a measure of objective opening strength or a causal
+    claim: it only adjusts each game for the rating gap between the players.
+    """
+    openings = storage.get_user_adjusted_openings(
+        user_id,
+        date_from=date_from,
+        date_to=date_to,
+        color=color,
+        grouping=grouping,
+        min_games=min_games,
+    )
+    if openings is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+    return [AdjustedOpening.model_validate(opening) for opening in openings]
+
+
 @app.get("/api/users/{user_id}/responses", response_model=list[FirstMoveResponse])
 def user_first_move_responses(
     user_id: int,
@@ -447,3 +517,49 @@ def user_opening_review(user_id: int, storage: StorageDependency, family: str, d
         mistake = first_major_mistake(str(game.pop("pgn")), str(game.pop("player_color")))
         reviews.append({**game, **(mistake or {"move": None, "move_number": None, "centipawns_lost": None})})
     return reviews
+
+
+@app.get("/api/users/{user_id}/openings/practice", response_model=OpeningPractice)
+def user_opening_practice(
+    user_id: int,
+    storage: StorageDependency,
+    family: Annotated[str, Query(min_length=1, max_length=160)],
+    date_from: Annotated[str | None, Query(pattern=r"^\d{4}\.\d{2}\.\d{2}$")] = None,
+    date_to: Annotated[str | None, Query(pattern=r"^\d{4}\.\d{2}\.\d{2}$")] = None,
+    color: Literal["white", "black"] | None = None,
+) -> OpeningPractice:
+    """Create a Lichess analysis link for one common line in this opening."""
+    reference = storage.get_opening_reference_game(
+        user_id, family, date_from=date_from, date_to=date_to, color=color
+    )
+    if reference is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opening not found.")
+    moves = opening_move_path(
+        str(reference["pgn"]),
+        reference["opening_ply"] if isinstance(reference["opening_ply"], int) else None,
+    )
+    if moves is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Opening moves unavailable.")
+    return OpeningPractice(
+        reference_opening=str(reference["opening"]),
+        moves=moves,
+        lichess_url=f"https://lichess.org/analysis/pgn/{quote('_'.join(moves), safe='_')}",
+    )
+
+
+@app.get("/api/users/{user_id}/tactics", response_model=TacticsOverview)
+def user_tactics(
+    user_id: int,
+    storage: StorageDependency,
+    date_from: Annotated[str | None, Query(pattern=r"^\d{4}\.\d{2}\.\d{2}$")] = None,
+    date_to: Annotated[str | None, Query(pattern=r"^\d{4}\.\d{2}\.\d{2}$")] = None,
+    color: Literal["white", "black"] | None = None,
+) -> TacticsOverview:
+    """Summarize clear tactical motifs from a small sample of recent losses."""
+    patterns: dict[str, list[dict[str, object]]] = {}
+    games = storage.get_recent_losses(user_id, date_from=date_from, date_to=date_to, color=color)
+    for game in games:
+        mistake = first_major_mistake(str(game.pop("pgn")), str(game.pop("player_color")))
+        if mistake is not None and mistake["pattern"] != "a tactical turning point":
+            patterns.setdefault(str(mistake["pattern"]), []).append({**game, **mistake})
+    return TacticsOverview(sample_size=len(games), patterns=[TacticPattern(pattern=pattern, count=len(examples), examples=[TacticExample.model_validate(example) for example in examples]) for pattern, examples in sorted(patterns.items(), key=lambda item: -len(item[1]))])

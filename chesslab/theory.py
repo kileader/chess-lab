@@ -46,6 +46,19 @@ def assess_pgn_opening(
     }
 
 
+def opening_move_path(pgn_text: str, opening_ply: int | None) -> list[str] | None:
+    """Return the classified opening's main-line moves in SAN."""
+    game = chess.pgn.read_game(StringIO(pgn_text))
+    if game is None:
+        return None
+    board = game.board()
+    moves: list[str] = []
+    for move in list(game.mainline_moves())[:opening_ply or 6]:
+        moves.append(board.san(move))
+        board.push(move)
+    return moves or None
+
+
 def first_major_mistake(pgn_text: str, player_color: str) -> dict[str, object] | None:
     """Find the first player move that drops the evaluation by a full pawn."""
     engine_path = Path(os.environ.get("CHESSLAB_STOCKFISH_PATH", DEFAULT_ENGINE_PATH))
@@ -61,10 +74,19 @@ def first_major_mistake(pgn_text: str, player_color: str) -> dict[str, object] |
             if board.turn != player_turn:
                 board.push(move)
                 continue
-            before = engine.analyse(board, chess.engine.Limit(depth=8))["score"].pov(player_turn).score(mate_score=100_000)
+            before_info = engine.analyse(board, chess.engine.Limit(depth=6))
+            before = before_info["score"].pov(player_turn).score(mate_score=100_000)
+            best_move = before_info.get("pv", [None])[0]
+            best_san = board.san(best_move) if best_move is not None else None
             san = board.san(move)
             board.push(move)
             after = engine.analyse(board, chess.engine.Limit(depth=8))["score"].pov(player_turn).score(mate_score=100_000)
             if before is not None and after is not None and before - after >= 100:
-                return {"move": san, "move_number": (ply + 1) // 2, "centipawns_lost": before - after}
+                if best_san and ("+" in best_san or "#" in best_san):
+                    pattern = "missed a forcing check"
+                elif best_san and "x" in best_san:
+                    pattern = "missed a capture"
+                else:
+                    pattern = "a tactical turning point"
+                return {"move": san, "move_number": (ply + 1) // 2, "centipawns_lost": before - after, "best_move": best_san, "pattern": pattern}
     return None

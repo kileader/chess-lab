@@ -1,6 +1,7 @@
 """SQLite persistence for structured Chess Lab game records."""
 
 import io
+import math
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
@@ -487,6 +488,95 @@ class SQLiteGameStorage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_user_adjusted_openings(
+        self,
+        user_id: int,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        color: str | None = None,
+        grouping: str = "family",
+        min_games: int = 8,
+    ) -> list[dict[str, object]] | None:
+        """Compare opening results with the score implied by rating differences.
+
+        This deliberately uses the standard Elo expectation game by game rather
+        than treating all opponents in an opening as equally strong.  The
+        confidence interval is for the mean game-level residual, so it conveys
+        sample uncertainty without claiming that the opening caused the result.
+        """
+        if self.get_user_profile(user_id) is None:
+            return None
+
+        where, parameters = self._user_game_filter(
+            user_id, date_from=date_from, date_to=date_to, color=color
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT game.eco, game.opening, game.result, game.white_elo,
+                       game.black_elo, link.player_color
+                FROM user_games AS link
+                JOIN games AS game ON game.id = link.game_id
+                WHERE {where}
+                  AND game.opening IS NOT NULL
+                  AND game.result IN ('1-0', '0-1', '1/2-1/2')
+                  AND game.white_elo IS NOT NULL
+                  AND game.black_elo IS NOT NULL
+                """,
+                parameters,
+            ).fetchall()
+
+        groups: dict[tuple[str, str], dict[str, object]] = {}
+        for row in rows:
+            opening = str(row["opening"])
+            if grouping == "family":
+                opening = opening.split(":", 1)[0]
+            player_color = str(row["player_color"])
+            key = (opening, player_color)
+            group = groups.setdefault(
+                key,
+                {"eco": row["eco"], "residuals": [], "actual_scores": [], "expected_scores": []},
+            )
+            player_rating = int(row["white_elo"] if player_color == "white" else row["black_elo"])
+            opponent_rating = int(row["black_elo"] if player_color == "white" else row["white_elo"])
+            expected = 1 / (1 + 10 ** ((opponent_rating - player_rating) / 400))
+            result = str(row["result"])
+            actual = 0.5 if result == "1/2-1/2" else (
+                1.0 if (player_color == "white") == (result == "1-0") else 0.0
+            )
+            group["expected_scores"].append(expected)  # type: ignore[union-attr]
+            group["actual_scores"].append(actual)  # type: ignore[union-attr]
+            group["residuals"].append(actual - expected)  # type: ignore[union-attr]
+
+        adjusted: list[dict[str, object]] = []
+        for (opening, player_color), group in groups.items():
+            residuals: list[float] = group["residuals"]  # type: ignore[assignment]
+            games = len(residuals)
+            if games < min_games:
+                continue
+            mean_residual = sum(residuals) / games
+            if games > 1:
+                variance = sum((residual - mean_residual) ** 2 for residual in residuals) / (games - 1)
+                margin = 1.96 * math.sqrt(variance / games)
+            else:
+                margin = 0.0
+            actual_scores: list[float] = group["actual_scores"]  # type: ignore[assignment]
+            expected_scores: list[float] = group["expected_scores"]  # type: ignore[assignment]
+            adjusted.append({
+                "eco": group["eco"],
+                "opening": opening,
+                "color": player_color,
+                "games": games,
+                "actual_score": sum(actual_scores) / games,
+                "expected_score": sum(expected_scores) / games,
+                "adjusted_score": mean_residual,
+                "confidence_low": mean_residual - margin,
+                "confidence_high": mean_residual + margin,
+                "reliability": "reliable" if games >= 30 else "limited",
+            })
+        return sorted(adjusted, key=lambda item: (-float(item["adjusted_score"]), -int(item["games"])))
+
     def get_user_responses_to_first_move(
         self,
         user_id: int,
@@ -707,6 +797,18 @@ class SQLiteGameStorage:
                   AND ((link.player_color = 'white' AND game.result = '0-1') OR (link.player_color = 'black' AND game.result = '1-0'))
                 ORDER BY game.date DESC, game.id DESC LIMIT ?
             """, (*parameters, family, f"{escaped}:%", limit)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_recent_losses(self, user_id: int, *, date_from: str | None = None, date_to: str | None = None, color: str | None = None, limit: int = 6) -> list[dict[str, object]]:
+        """Return a small, recent loss sample for cross-game tactical analysis."""
+        where, parameters = self._user_game_filter(user_id, date_from=date_from, date_to=date_to, color=color)
+        with self._connect() as connection:
+            rows = connection.execute(f"""
+                SELECT game.date, game.white, game.black, game.source_url, game.pgn, link.player_color
+                FROM user_games AS link JOIN games AS game ON game.id = link.game_id
+                WHERE {where} AND ((link.player_color = 'white' AND game.result = '0-1') OR (link.player_color = 'black' AND game.result = '1-0'))
+                ORDER BY game.date DESC, game.id DESC LIMIT ?
+            """, (*parameters, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def backfill_openings(self, catalog: object) -> tuple[int, int]:

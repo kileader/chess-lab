@@ -49,6 +49,21 @@ type FirstMoveResponse = {
   losses: number;
 };
 
+type AdjustedOpening = {
+  eco: string | null;
+  opening: string;
+  color: 'white' | 'black';
+  games: number;
+  actual_score: number;
+  expected_score: number;
+  adjusted_score: number;
+  confidence_low: number;
+  confidence_high: number;
+  reliability: 'limited' | 'reliable';
+};
+
+type TacticsOverview = { sample_size: number; patterns: Array<{ pattern: string; count: number; examples: Array<{ source_url: string | null; white: string | null; black: string | null; move: string | null; best_move: string | null }> }> };
+
 type AnalysisFilters = {
   date_from?: string;
   date_to?: string;
@@ -110,6 +125,28 @@ async function loadFirstMoveResponses(filters: AnalysisFilters): Promise<FirstMo
   }
 }
 
+async function loadTactics(filters: AnalysisFilters): Promise<TacticsOverview | null> {
+  try {
+    const query = new URLSearchParams();
+    if (filters.date_from) query.set('date_from', filters.date_from);
+    if (filters.date_to) query.set('date_to', filters.date_to);
+    if (filters.color) query.set('color', filters.color);
+    const response = await fetch(`${apiBase}/api/users/1/tactics?${query}`, { cache: 'no-store' });
+    return response.ok ? response.json() as Promise<TacticsOverview> : null;
+  } catch { return null; }
+}
+
+async function loadAdjustedOpenings(filters: AnalysisFilters): Promise<AdjustedOpening[]> {
+  try {
+    const query = new URLSearchParams({ grouping: filters.grouping, min_games: '8' });
+    if (filters.date_from) query.set('date_from', filters.date_from);
+    if (filters.date_to) query.set('date_to', filters.date_to);
+    if (filters.color) query.set('color', filters.color);
+    const response = await fetch(`${apiBase}/api/users/1/openings/adjusted?${query}`, { cache: 'no-store' });
+    return response.ok ? response.json() as Promise<AdjustedOpening[]> : [];
+  } catch { return []; }
+}
+
 function scorePercent(wins: number, draws: number, games: number) {
   return games ? ((wins + draws / 2) / games) * 100 : 0;
 }
@@ -163,11 +200,13 @@ export default async function Home({ searchParams }: PageProps) {
       : undefined,
     grouping: firstValue(params.grouping) === 'variation' ? 'variation' : 'family',
   };
-  const [overview, lifetimeOverview, recentGames, firstMoveResponses] = await Promise.all([
+  const [overview, lifetimeOverview, recentGames, firstMoveResponses, tactics, adjustedOpenings] = await Promise.all([
     loadOverview(filters),
     loadOverview({ grouping: 'family' }),
     loadRecentGames(),
     loadFirstMoveResponses(filters),
+    loadTactics(filters),
+    loadAdjustedOpenings(filters),
   ]);
 
   if (!overview || !lifetimeOverview) {
@@ -188,6 +227,18 @@ export default async function Home({ searchParams }: PageProps) {
     overview.draws,
     overview.total_games,
   );
+  const byReliabilityThenAdjustment = (left: AdjustedOpening, right: AdjustedOpening) => {
+    const reliabilityDifference = Number(right.reliability === 'reliable') - Number(left.reliability === 'reliable');
+    return reliabilityDifference || right.adjusted_score - left.adjusted_score;
+  };
+  const aboveExpectation = adjustedOpenings
+    .filter((opening) => opening.adjusted_score > 0)
+    .sort(byReliabilityThenAdjustment)
+    .slice(0, 3);
+  const belowExpectation = [...adjustedOpenings]
+    .filter((opening) => opening.adjusted_score < 0)
+    .sort((left, right) => byReliabilityThenAdjustment(right, left))
+    .slice(0, 3);
   const identity = overview.user.identities[0];
   const detailQuery = new URLSearchParams();
   if (filters.date_from) detailQuery.set('date_from', filters.date_from);
@@ -313,6 +364,20 @@ export default async function Home({ searchParams }: PageProps) {
             const responseScore = scorePercent(response.wins, response.draws, response.games);
             return <div className="response-row" key={response.reply}><strong>1…{response.reply}</strong><span>{response.games} games</span><span>{responseScore.toFixed(1)}% score</span><i aria-hidden="true"><b style={{ width: `${response.games / firstMoveResponses[0].games * 100}%` }} /></i></div>;
           })}</div>
+        </section>}
+
+        {tactics && tactics.patterns.length > 0 && <section className="panel tactics-panel" aria-labelledby="tactics-title">
+          <div className="panel-heading"><div><p className="eyebrow">From recent losses</p><h2 id="tactics-title">Tactical clues to revisit</h2></div><span className="panel-note">{tactics.sample_size} games sampled</span></div>
+          {tactics.patterns.slice(0, 2).map((pattern) => <div className="tactic-row" key={pattern.pattern}><div><strong>{pattern.pattern[0].toUpperCase() + pattern.pattern.slice(1)}</strong><p>{pattern.count === 1 ? 'One sampled loss had this as the first clear engine swing.' : `${pattern.count} sampled losses had this as the first clear engine swing.`}</p></div><div>{pattern.examples.slice(0, 2).map((example, index) => <a href={example.source_url ?? '#'} target={example.source_url ? '_blank' : undefined} key={`${example.source_url}-${index}`}>{example.move ? `${example.move} instead of ${example.best_move ?? 'the best move'}` : `${example.white} vs ${example.black}`} →</a>)}</div></div>)}
+        </section>}
+
+        {adjustedOpenings.length > 0 && <section className="panel adjusted-panel" aria-labelledby="adjusted-title">
+          <div className="panel-heading"><div><p className="eyebrow">Rating-adjusted results</p><h2 id="adjusted-title">Opening results, adjusted for opponents</h2></div><span className="panel-note">Actual score versus the rating gap&apos;s prediction</span></div>
+          <p className="adjusted-explainer">This compares your score in each opening with the score expected from who you faced. It does not measure whether an opening is objectively strong.</p>
+          <div className="adjusted-grid">
+            <div className="adjusted-column"><p className="eyebrow">Above expectation</p>{aboveExpectation.length ? aboveExpectation.map((opening) => <AdjustedOpeningRow opening={opening} detailQuery={detailQuery} key={`${opening.opening}-${opening.color}`} />) : <p className="adjusted-empty">Nothing is clearly above expectation in this window yet.</p>}</div>
+            <div className="adjusted-column"><p className="eyebrow">Below expectation</p>{belowExpectation.length ? belowExpectation.map((opening) => <AdjustedOpeningRow opening={opening} detailQuery={detailQuery} key={`${opening.opening}-${opening.color}`} />) : <p className="adjusted-empty">Nothing is clearly below expectation in this window yet.</p>}</div>
+          </div>
         </section>}
 
         {practiceOverview && (
@@ -449,6 +514,16 @@ export default async function Home({ searchParams }: PageProps) {
       </div>
     </main>
   );
+}
+
+function AdjustedOpeningRow({ opening, detailQuery }: { opening: AdjustedOpening; detailQuery: URLSearchParams }) {
+  const adjustment = opening.adjusted_score * 100;
+  const interval = `${(opening.confidence_low * 100).toFixed(1)} to ${(opening.confidence_high * 100).toFixed(1)} pts`;
+  return <a className="adjusted-row" href={`/openings/${encodeURIComponent(opening.opening)}${detailQuery.size ? `?${detailQuery}` : ''}`}>
+    <span className="eco-badge">{opening.eco ?? '—'}</span>
+    <span><strong>{opening.opening}</strong><small>As {opening.color === 'white' ? 'White' : 'Black'} · {opening.games} games · {opening.reliability} sample</small></span>
+    <span className={adjustment > 0 ? 'adjusted-positive' : 'adjusted-negative'}><b>{adjustment > 0 ? '+' : ''}{adjustment.toFixed(1)} pts</b><small>{(opening.actual_score * 100).toFixed(1)}% actual vs {(opening.expected_score * 100).toFixed(1)}% expected · 95%: {interval}</small></span>
+  </a>;
 }
 import { UploadForm } from './upload-form';
 import { ScopeControls } from './scope-controls';

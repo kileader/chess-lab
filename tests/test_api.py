@@ -99,33 +99,46 @@ def test_user_overview_uses_linked_platform_identity(
     )
     assert import_response.status_code == 200
 
+    second_pgn = (
+        lichess_pgn.replace("aB3dE5gH", "iJ4kL6mN")
+        .replace('[Date "2026.08.27"]', '[Date "2026.08.28"]')
+        .replace('[Result "1-0"]', '[Result "0-1"]')
+        .replace("4. Qxf7# 1-0", "4. Qxf7# 0-1")
+    )
+    second_import = client.post(
+        "/api/games/import",
+        files={"file": ("second_lichess.pgn", second_pgn, "application/x-chess-pgn")},
+    )
+    assert second_import.status_code == 200
+
     overview_response = client.get(f"/api/users/{user_id}/overview")
     assert overview_response.status_code == 200
-    assert overview_response.json() == {
+    overview = overview_response.json()
+    assert overview == {
         "user": {
             "id": user_id,
             "display_name": "Alice",
             "identities": [{"platform": "lichess", "username": "Alice"}],
         },
-        "total_games": 1,
-        "white_games": 1,
+        "total_games": 2,
+        "white_games": 2,
         "black_games": 0,
         "wins": 1,
         "draws": 0,
-        "losses": 0,
-        "classified_games": 1,
+        "losses": 1,
+        "classified_games": 2,
         "first_game_date": "2026.08.27",
-        "last_game_date": "2026.08.27",
+        "last_game_date": "2026.08.28",
         "minimum_rating": 1500,
         "maximum_rating": 1500,
         "top_openings": [
             {
                 "eco": "C20",
                 "opening": "King's Pawn Game",
-                "games": 1,
+                "games": 2,
                 "wins": 1,
                 "draws": 0,
-                "losses": 0,
+                "losses": 1,
             }
         ],
     }
@@ -137,30 +150,51 @@ def test_user_overview_uses_linked_platform_identity(
     assert detail_response.status_code == 200
     detail = detail_response.json()
     assert detail["family"] == "King's Pawn Game"
-    assert (detail["games"], detail["wins"], detail["draws"], detail["losses"]) == (1, 1, 0, 0)
+    assert (detail["games"], detail["wins"], detail["draws"], detail["losses"]) == (2, 1, 0, 1)
     assert detail["colors"] == [
-        {"color": "white", "games": 1, "wins": 1, "draws": 0, "losses": 0}
+        {"color": "white", "games": 2, "wins": 1, "draws": 0, "losses": 1}
     ]
     assert detail["variations"] == [
         {
             "eco": "C20",
             "opening": "King's Pawn Game",
-            "games": 1,
+            "games": 2,
             "wins": 1,
             "draws": 0,
-            "losses": 0,
+            "losses": 1,
         }
     ]
     assert detail["years"] == [
-        {"year": "2026", "games": 1, "wins": 1, "draws": 0, "losses": 0}
+        {"year": "2026", "games": 2, "wins": 1, "draws": 0, "losses": 1}
     ]
     assert detail["recent_games"][0]["player_color"] == "white"
 
     responses_response = client.get(f"/api/users/{user_id}/responses")
     assert responses_response.status_code == 200
     assert responses_response.json() == [
-        {"reply": "e5", "games": 1, "wins": 1, "draws": 0, "losses": 0}
+        {"reply": "e5", "games": 2, "wins": 1, "draws": 0, "losses": 1}
     ]
+
+    adjusted_response = client.get(
+        f"/api/users/{user_id}/openings/adjusted", params={"min_games": 2}
+    )
+    assert adjusted_response.status_code == 200
+    adjusted = adjusted_response.json()[0]
+    assert adjusted["opening"] == "King's Pawn Game"
+    assert adjusted["color"] == "white"
+    assert adjusted["games"] == 2
+    assert adjusted["actual_score"] == pytest.approx(0.5)
+    assert adjusted["expected_score"] == pytest.approx(0.5714631174)
+    assert adjusted["adjusted_score"] == pytest.approx(-0.0714631174)
+    assert adjusted["reliability"] == "limited"
+
+    practice_response = client.get(
+        f"/api/users/{user_id}/openings/practice",
+        params={"family": "King's Pawn Game"},
+    )
+    assert practice_response.status_code == 200
+    assert practice_response.json()["moves"] == ["e4", "e5", "Bc4", "Nc6", "Qh5", "Nf6"]
+    assert practice_response.json()["lichess_url"].endswith("/e4_e5_Bc4_Nc6_Qh5_Nf6")
 
 
 def test_user_repertoire_is_saved_per_user(storage: SQLiteGameStorage) -> None:

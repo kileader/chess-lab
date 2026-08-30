@@ -41,6 +41,8 @@ type OpeningReview = {
   centipawns_lost: number | null;
 };
 
+type OpeningPractice = { reference_opening: string; moves: string[]; lichess_url: string };
+
 type PageProps = {
   params: Promise<{ slug: string }>;
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -91,6 +93,15 @@ async function loadReviews(family: string, filters: URLSearchParams): Promise<Op
   } catch { return []; }
 }
 
+async function loadPractice(family: string, filters: URLSearchParams): Promise<OpeningPractice | null> {
+  try {
+    const query = new URLSearchParams(filters);
+    query.set('family', family);
+    const response = await fetch(`${apiBase}/api/users/1/openings/practice?${query}`, { cache: 'no-store' });
+    return response.ok ? response.json() as Promise<OpeningPractice> : null;
+  } catch { return null; }
+}
+
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { slug } = await params;
   const family = decodeURIComponent(slug);
@@ -114,7 +125,7 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
   if (dateFrom) filters.set('date_from', dateFrom);
   if (dateTo) filters.set('date_to', dateTo);
   if (color === 'white' || color === 'black') filters.set('color', color);
-  const [detail, theory, reviews] = await Promise.all([loadDetail(family, filters), loadTheory(family, filters), loadReviews(family, filters)]);
+  const [detail, theory, reviews, practice] = await Promise.all([loadDetail(family, filters), loadTheory(family, filters), loadReviews(family, filters), loadPractice(family, filters)]);
   const overviewFilters = new URLSearchParams(filters);
   if (period === 'all') overviewFilters.set('period', 'all');
   const overviewHref = `/${overviewFilters.size ? `?${overviewFilters}` : ''}#openings`;
@@ -187,6 +198,11 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
         {theory && <section className="theory-panel panel">
           <p className="eyebrow">Engine check</p>
           <div><strong>Engine says: {theory.verdict}</strong><span>Based on your most-played line: {theory.reference_opening}</span></div>
+        </section>}
+
+        {practice && <section className="practice-link-panel panel">
+          <div><p className="eyebrow">Put it on the board</p><h2>Practice this on Lichess</h2><p>Starts from your most-played line: {practice.moves.join(' ')}</p></div>
+          <a href={practice.lichess_url} target="_blank" rel="noreferrer">Open practice →</a>
         </section>}
 
         <section className="detail-grid">
