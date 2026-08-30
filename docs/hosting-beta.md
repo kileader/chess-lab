@@ -1,4 +1,4 @@
-# Hosted private beta
+# Hosted beta with private accounts
 
 ## What is implemented
 
@@ -10,8 +10,10 @@
 - Accounts are provisioned by stable Supabase user ID, never chess username or email.
 - Every API user route checks ownership. Global user listing/creation is unavailable
   to signed-in hosted users. Imports, deduplication, examples, notes and plans are private.
-- An explicit server-side email allowlist controls the beta. No public social feed
-  or automatic game sharing is enabled in this release.
+- Anyone can register with a verified sign-in when `CHESSLAB_ALLOWED_EMAILS` is
+  empty or unset. An optional server-side email allowlist can restrict access.
+  Open registration does not expose libraries: no public social feed or automatic
+  game sharing is enabled in this release.
 
 ## External setup required
 
@@ -20,8 +22,10 @@ or commit local environment files. No paid resource has been provisioned by this
 
 1. Create/select a Supabase project. Enable Google in Authentication → Providers.
    Configure a Google OAuth web client with the callback URI shown by Supabase.
-   Disable unused sign-in methods and anonymous sign-in. Add testers to Google's
-   consent-screen test users while the OAuth app is in testing mode.
+   Disable unused sign-in methods and anonymous sign-in. Use Google's External
+   audience and In production publishing status for launch. Google exempts basic
+   identity-only scopes (`openid`, email, profile) from the testing user list;
+   additional scopes may require test users or verification.
 2. Supabase → URL configuration: set the production site URL and explicitly allow
    `https://<vercel-production-host>/auth/callback`. Avoid broad preview-host wildcards.
 3. Vercel: import this repo with **Root Directory `frontend`**, Next.js framework,
@@ -38,7 +42,8 @@ or commit local environment files. No paid resource has been provisioned by this
    - `DATABASE_URL` referencing Railway PostgreSQL's private connection URL
    - `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` matching the frontend
    - `CHESSLAB_ALLOWED_ORIGINS=https://<vercel-production-host>`
-   - `CHESSLAB_ALLOWED_EMAILS=<Kevin's Google email>,<invited tester emails>`
+   - Leave `CHESSLAB_ALLOWED_EMAILS` unset or empty for open registration. Remove
+     any existing list; a nonempty list still restricts sign-in to those emails.
    - `CHESSLAB_ENGINE_ENABLED=false`
 5. Set Railway spend controls and PostgreSQL backups. The $5 subscription is not
    a hard cap on compute/database usage. No change to billing is automated here.
@@ -98,8 +103,9 @@ counts and deployed cross-account checks pass.
   Opening results, adjusted scores, explorer and practice bookmarks do not need the
   engine. The production container deliberately does not bundle Stockfish. Adding
   engine jobs needs bounded execution, a Linux binary, and a resource budget first.
-- This is an invite-only test release, not an unrestricted signup service. Public
-  launch needs rate limits, abuse controls, account deletion/export, and a privacy policy.
+- Registration is open by default, but this remains a beta, not a production-readiness
+  claim. Rate limits, abuse controls, account deletion/export, and a privacy policy
+  remain launch-hardening work. Keep Railway spend controls and backups configured.
 
 References: [Supabase Google login](https://supabase.com/docs/guides/auth/social-login/auth-google),
 [Supabase SSR](https://supabase.com/docs/guides/auth/server-side/nextjs),

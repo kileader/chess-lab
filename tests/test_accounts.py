@@ -129,22 +129,35 @@ def auth_request(token=None, host='testserver', client='127.0.0.1', extra=()):
                     'headers': headers, 'client': (client, 1234), 'server': (host, 80)})
 
 
-def test_real_verifier_rejects_bad_sessions_and_checks_invites(monkeypatch):
+@pytest.mark.parametrize('allowed_emails', [None, '', ' , ', 'alice@example.test'])
+def test_real_verifier_rejects_bad_sessions_and_checks_invites(monkeypatch, allowed_emails):
     monkeypatch.setenv('CHESSLAB_AUTH_MODE', 'supabase')
     monkeypatch.setenv('SUPABASE_URL', 'https://project.supabase.co')
     monkeypatch.setenv('SUPABASE_PUBLISHABLE_KEY', 'test-public-key')
-    monkeypatch.setenv('CHESSLAB_ALLOWED_EMAILS', 'alice@example.test')
+    monkeypatch.setenv('CHESSLAB_ENV', 'production')
+    if allowed_emails is None:
+        monkeypatch.delenv('CHESSLAB_ALLOWED_EMAILS', raising=False)
+    else:
+        monkeypatch.setenv('CHESSLAB_ALLOWED_EMAILS', allowed_emails)
+    validate_auth_configuration()
     subject = str(uuid4())
     def respond(request):
         assert str(request.url) == 'https://project.supabase.co/auth/v1/user'
         token = request.headers['authorization']
         if token == 'Bearer invalid':
             return httpx.Response(401)
-        return httpx.Response(200, json={'id': subject, 'email': token.split()[-1] + '@example.test', 'email_confirmed_at': '2026-08-30T00:00:00Z'})
+        return httpx.Response(200, json={'id': subject, 'email': token.split()[-1] + '@example.test',
+                                      'email_confirmed_at': None if token == 'Bearer unverified' else '2026-08-30T00:00:00Z',
+                                      'is_anonymous': token == 'Bearer anonymous'})
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         monkeypatch.setattr('backend.auth.auth_client', lambda: client)
         assert get_principal(auth_request('Bearer alice')).subject == subject
-        for token, code in [(None, 401), ('Bearer invalid', 401), ('Bearer bob', 403)]:
+        failures = [(None, 401), ('Bearer invalid', 401), ('Bearer unverified', 401), ('Bearer anonymous', 401)]
+        if allowed_emails == 'alice@example.test':
+            failures.append(('Bearer bob', 403))
+        else:
+            assert get_principal(auth_request('Bearer bob')).email == 'bob@example.test'
+        for token, code in failures:
             with pytest.raises(HTTPException) as error:
                 get_principal(auth_request(token))
             assert error.value.status_code == code

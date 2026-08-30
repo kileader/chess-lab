@@ -37,8 +37,6 @@ def validate_auth_configuration() -> None:
         raise RuntimeError("Set SUPABASE_URL to the HTTPS project URL.")
     if not os.getenv("SUPABASE_PUBLISHABLE_KEY"):
         raise RuntimeError("Set SUPABASE_PUBLISHABLE_KEY (not a service-role key).")
-    if hosted_environment() and not os.getenv("CHESSLAB_ALLOWED_EMAILS", "").strip():
-        raise RuntimeError("Set CHESSLAB_ALLOWED_EMAILS for the invite-only beta.")
 
 
 @lru_cache(maxsize=1)
@@ -76,6 +74,8 @@ def get_principal(request: Request) -> Principal | None:
             raise ValueError("Unverified identity")
     except (ValueError, TypeError, KeyError, AttributeError) as error:
         raise HTTPException(401, "A verified account is required.") from error
+    # Empty/unset means open registration, not anonymous access. Every account
+    # still requires the verified Supabase identity above and API ownership checks.
     allowed = {email.strip().casefold() for email in os.getenv("CHESSLAB_ALLOWED_EMAILS", "").split(",") if email.strip()}
     if allowed and email not in allowed:
         raise HTTPException(403, "This beta is invite-only. Ask Kevin to add your Google email.")
