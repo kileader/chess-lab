@@ -87,6 +87,40 @@ platform constraint while preserving identities. Ensure Railway's **Pre-deploy C
 the settings page. SQLite performs an atomic table-copy upgrade of older keys/checks.
 PostgreSQL tests cover both fresh schemas and upgrading existing identity records.
 
+### Manual Chess.com sync
+
+Open **Import games** (`/import`), select a saved Chess.com username, choose dates
+and a time control, then **Sync games**. Rapid and the last 90 days are selected
+initially. Usernames settings also links directly to sync for each Chess.com name.
+Only completed standard-chess games are imported. Both date endpoints are inclusive,
+using the game's **end time in UTC** (which can differ from its PGN start date).
+The dashboard's existing date filters are independent; the result links to all dates.
+
+The backend calls Chess.com's public API without a password/token. A plan request
+lists matching monthly archives; the browser then requests each month sequentially,
+newest first. Keep the import page open. Stop finishes the current request and
+prevents subsequent month requests. Successful months are committed to the verified
+account's private library using the existing import/deduplication pipeline. There
+is no shared library or account impersonation. An interrupted run can be retried;
+it skips games already saved, including before an uncertain network response.
+
+Endpoints: `POST /api/games/sync/chess-com/plan` and `/month`. Both require a saved
+Chess.com identity belonging to the signed-in account; client-supplied owner IDs
+are rejected. The month endpoint also validates its month against the chosen dates.
+Provider URLs are never followed from archive payloads. Requests use a fixed HTTPS
+host, no redirects, bounded timeouts and decoded response sizes, and no auth cookies
+or tokens. Each month is fully parsed before writing, with a maximum of 20 MiB,
+5,000 archive games and 128 KiB per selected PGN. Oversized months can still use
+smaller PGN uploads. Invalid selected games abort that month without partial writes.
+
+The current single-worker Railway service serializes outbound Chess.com requests
+using a nonblocking process lock; concurrent requests or provider rate limits stop
+with a retry message, retaining earlier completed months. Before scaling to multiple
+workers/replicas, replace that guard with a shared provider queue/limiter. Chess.com's
+caching can delay recent games. No scheduler, persistent sync job, additional service,
+new environment variables, or database migration is needed for this release.
+Lichess syncing and scheduled syncing are not implemented; PGN uploads remain available.
+
 ## Preserve Kevin's current data
 
 Leave the SQLite file in place and take a backup before transferring it. First sign

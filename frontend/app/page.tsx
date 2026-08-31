@@ -2,6 +2,7 @@ import { requireAccount, serverApi } from '../lib/api-server';
 import { AccountMenu } from './account-menu';
 import { safeGameLink } from '../lib/safe-link';
 import { gameOutcome } from '../lib/game-outcome';
+import Link from 'next/link';
 
 export const dynamic = 'force-dynamic';
 
@@ -535,6 +536,7 @@ export default async function Home({ searchParams }: PageProps) {
           <aside className="panel import-panel" id="upload">
             <p className="eyebrow">Keep the archive current</p>
             <h2>Import games</h2>
+            <Link className="sync-import-link" href="/import">Sync from Chess.com →</Link>
             <p>Add a Lichess, Chess.com, or standard PGN archive. Existing games are skipped automatically.</p>
             <UploadForm />
           </aside>

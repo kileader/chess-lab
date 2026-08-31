@@ -13,6 +13,7 @@ export default async function Settings() {
     <p className="eyebrow">Account settings</p><h1>Your chess usernames.</h1>
     <p>Add the accounts you play on, or correct a typo. We combine their results and use each username to identify your side in imported games.</p>
     {authEnabled() ? <IdentityForm initialIdentities={account.identities} /> : <p>Username settings are available when signed in with Google. Your legacy local profile is unchanged.</p>}
+    {authEnabled() && account.identities.filter((identity) => identity.platform === 'chess_com').map((identity) => <p key={identity.username}><Link className="sync-import-link" href={`/import?username=${encodeURIComponent(identity.username)}`}>Sync games for {identity.username} →</Link></p>)}
     <AccountMenu />
   </section></main>;
 }

@@ -414,3 +414,72 @@ def test_postgres_identity_primary_key_upgrade_preserves_existing_rows(account_s
     assert storage.get_user_profile(user_id)['identities'] == [identity]
     storage.update_account_identities(user_id, [identity, {**identity, 'username': 'Alt'}])
     assert len(storage.get_user_profile(user_id)['identities']) == 2
+
+
+def test_chesscom_sync_uses_saved_identity_and_keeps_libraries_private(accounts, monkeypatch):
+    client, storage = accounts
+    alice, bob = {'Authorization': 'Bearer alice'}, {'Authorization': 'Bearer bob'}
+    profile = {'display_name': 'Alice', 'platform': 'chess_com', 'username': 'Alice'}
+    a = client.post('/api/account', headers=alice, json=profile).json()['id']
+    b = client.post('/api/account', headers=bob, json=profile).json()['id']
+    body = {'username': 'ALICE', 'date_from': '2026-08-27', 'date_to': '2026-08-27', 'time_class': 'rapid'}
+    pgn = (Path(__file__).parent / 'fixtures' / 'normal_game.pgn').read_text().replace('[Site "Local"]', '[Site "Chess.com"]')
+    calls = []
+    def fetch(path):
+        calls.append(path)
+        if path.endswith('/archives'):
+            return {'archives': ['https://api.chess.com/pub/player/alice/games/2026/08']}
+        return {'games': [{'url': 'https://www.chess.com/game/live/12345', 'end_time': 1787788800,
+                           'rules': 'chess', 'time_class': 'rapid', 'pgn': pgn}]}
+    monkeypatch.setattr('chesslab.chesscom.fetch_json', fetch)
+    assert client.post('/api/games/sync/chess-com/plan', headers=alice, json=body).json() == {'months': ['2026-08']}
+    endpoint = '/api/games/sync/chess-com/month'
+    month = {**body, 'month': '2026-08'}
+    result = client.post(endpoint, headers=alice, json=month)
+    assert result.status_code == 200
+    assert result.json() == {'month': '2026-08', 'games_received': 1, 'games_added': 1,
+                             'duplicates_skipped': 0, 'filtered_games': 0, 'matched_games': 1}
+    assert client.post(endpoint, headers=alice, json=month).json()['duplicates_skipped'] == 1
+    assert client.get(f'/api/users/{a}/overview', headers=alice).json()['total_games'] == 1
+    assert storage.count_games(owner_user_id=b) == 0
+    # A previous manual upload (even without Link) also deduplicates on sync.
+    assert client.post('/api/games/import', headers=bob, files={'file': ('games.pgn', pgn)}).json()['games_added'] == 1
+    assert client.post(endpoint, headers=bob, json=month).json()['duplicates_skipped'] == 1
+    assert storage.count_games(owner_user_id=b) == 1
+    assert calls == ['alice/games/archives'] + ['alice/games/2026/08'] * 3
+
+
+def test_chesscom_sync_validation_errors_never_download_or_write(accounts, monkeypatch):
+    client, storage = accounts
+    headers = {'Authorization': 'Bearer alice'}
+    a = client.post('/api/account', headers=headers, json={'display_name': 'Alice', 'platform': 'chess_com', 'username': 'Alice'}).json()['id']
+    def unexpected(*args):
+        pytest.fail('Invalid requests must not contact Chess.com')
+    monkeypatch.setattr('chesslab.chesscom.fetch_json', unexpected)
+    body = {'username': 'Alice', 'date_from': '2026-08-01', 'date_to': '2026-08-27', 'month': '2026-08'}
+    endpoint = '/api/games/sync/chess-com/month'
+    assert client.post(endpoint, json=body).status_code == 401
+    for changes in [{'username': 'Bob'}, {'username': '../alice'}, {'user_id': a + 1},
+                    {'date_from': '2026-08-28'}, {'date_to': '9999-12-31'}, {'date_from': '2026-02-30'},
+                    {'month': '2026-07'}, {'month': '2026-13'}, {'time_class': 'unknown'}]:
+        assert client.post(endpoint, headers=headers, json={**body, **changes}).status_code == 422
+    storage.update_account_identities(a, [{'platform': 'lichess', 'username': 'Alice'}])
+    assert client.post(endpoint, headers=headers, json=body).status_code == 422
+    assert storage.count_games(owner_user_id=a) == 0
+
+
+def test_chesscom_sync_failure_keeps_previous_month_and_can_retry(accounts, monkeypatch):
+    client, storage = accounts
+    headers = {'Authorization': 'Bearer alice'}
+    user_id = client.post('/api/account', headers=headers, json={'display_name': 'Alice', 'platform': 'chess_com', 'username': 'Alice'}).json()['id']
+    record = replace(load_game_records(Path(__file__).parent / 'fixtures' / 'normal_game.pgn')[0], source='chess_com')
+    storage.import_games([record], owner_user_id=user_id)
+    from chesslab.chesscom import ChessComError
+    def fail(*args):
+        raise ChessComError('Chess.com is limiting requests. Wait a minute, then retry.', 429)
+    monkeypatch.setattr('backend.app.monthly_records', fail)
+    body = {'username': 'Alice', 'date_from': '2026-08-01', 'date_to': '2026-08-27', 'month': '2026-08'}
+    assert client.post('/api/games/sync/chess-com/month', headers=headers, json=body).status_code == 429
+    assert storage.count_games(owner_user_id=user_id) == 1
+    monkeypatch.setattr('backend.app.monthly_records', lambda *args: ([record], 0))
+    assert client.post('/api/games/sync/chess-com/month', headers=headers, json=body).json()['duplicates_skipped'] == 1

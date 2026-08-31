@@ -1,6 +1,7 @@
 """FastAPI application for Chess Lab."""
 
 import os
+from datetime import date, datetime, timezone
 from io import TextIOWrapper
 from pathlib import Path
 from typing import Annotated, Literal
@@ -8,7 +9,7 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 import chess
 
@@ -16,6 +17,7 @@ from backend.auth import get_principal, hosted_environment, validate_auth_config
 from backend.request_limits import RequestSizeLimit
 
 from chesslab import APP_NAME
+from chesslab.chesscom import ChessComError, archive_months, monthly_records
 from chesslab.explorer import explore_position
 from chesslab.importer import iter_game_records
 from chesslab.identities import validate_chess_username
@@ -421,6 +423,66 @@ def update_account_identities(request: Request, details: AccountIdentitiesUpdate
 def health() -> dict[str, str]:
     """Report whether the API process is running."""
     return {"status": "ok"}
+
+
+class ChessComSyncRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    username: str = Field(min_length=1, max_length=40, pattern=r'^[A-Za-z0-9_-]+$')
+    date_from: date
+    date_to: date
+    time_class: Literal['rapid', 'blitz', 'bullet', 'daily', 'all'] = 'rapid'
+
+    @model_validator(mode='after')
+    def valid_range(self):
+        if not date(2007, 1, 1) <= self.date_from <= self.date_to <= datetime.now(timezone.utc).date():
+            raise ValueError('Choose dates from 2007 through today, with the start on or before the end.')
+        return self
+
+
+class ChessComMonthRequest(ChessComSyncRequest):
+    month: str = Field(pattern=r'^\d{4}-(0[1-9]|1[0-2])$')
+
+    @model_validator(mode='after')
+    def valid_month(self):
+        if not self.date_from.strftime('%Y-%m') <= self.month <= self.date_to.strftime('%Y-%m'):
+            raise ValueError('The archive month must fall inside the selected dates.')
+        return self
+
+
+def require_chesscom_identity(request: Request, details: ChessComSyncRequest, storage):
+    owner = request.state.user_id
+    if owner is None:
+        raise HTTPException(409, 'Sign in with Google to sync games into your private library.')
+    identities = storage.get_user_profile(owner)['identities']
+    if not any(identity['platform'] == 'chess_com' and identity['username'].lower() == details.username.lower() for identity in identities):
+        raise HTTPException(422, 'Add this Chess.com username in Usernames settings before syncing.')
+    return owner, identities
+
+
+@app.post('/api/games/sync/chess-com/plan')
+def plan_chesscom_sync(request: Request, details: ChessComSyncRequest, storage: StorageDependency):
+    require_chesscom_identity(request, details, storage)
+    try:
+        return {'months': archive_months(details.username, details.date_from, details.date_to)}
+    except ChessComError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+
+
+@app.post('/api/games/sync/chess-com/month')
+def sync_chesscom_month(request: Request, details: ChessComMonthRequest, storage: StorageDependency):
+    owner, _ = require_chesscom_identity(request, details, storage)
+    try:
+        records, filtered = monthly_records(details.username, details.month, details.date_from,
+                                             details.date_to, details.time_class, default_opening_catalog)
+    except ChessComError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+    # Recheck after the network request in case the user edited identities meanwhile.
+    _, identities = require_chesscom_identity(request, details, storage)
+    usernames = {identity['username'].lower() for identity in identities if identity['platform'] == 'chess_com'}
+    received, added = storage.import_games(records, owner_user_id=owner)
+    matched = sum(((game.white or '').lower() in usernames) != ((game.black or '').lower() in usernames) for game in records)
+    return {'month': details.month, 'games_received': received, 'games_added': added,
+            'duplicates_skipped': received - added, 'filtered_games': filtered, 'matched_games': matched}
 
 
 @app.post("/api/games/import", response_model_exclude_none=True)

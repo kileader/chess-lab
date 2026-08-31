@@ -359,6 +359,23 @@ footer { display: flex; justify-content: space-between; padding: 25px 0 45px; bo
 .identity-status { color: var(--forest); }
 .identity-card > .account-menu { margin-top: 24px; }
 .outcome-unscored { background: var(--card); color: var(--muted); }
+.import-card { width: min(100%, 720px); max-width: 720px; }
+.import-card h2 { margin: 22px 0 16px; font-size: 22px; letter-spacing: -.03em; }
+.sync-form fieldset { display: grid; gap: 16px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.sync-form legend { margin-bottom: 16px; color: var(--muted); font-size: 13px; }
+.sync-dates { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.sync-form input, .sync-form select { min-width: 0; width: 100%; }
+.sync-form small, .sync-notice { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.sync-notice a, .sync-progress a { text-decoration: underline; }
+.sync-form fieldset:disabled { opacity: .65; }
+.sync-form .identity-remove { justify-self: start; }
+.sync-progress { padding: 16px; border: 1px solid var(--line); border-radius: 12px; font-size: 13px; line-height: 1.6; }
+.sync-progress progress { display: block; width: 100%; height: 12px; margin: 12px 0 6px; accent-color: var(--forest); }
+.sync-progress p { margin: 12px 0; }
+.sync-upload { margin: 28px 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.sync-upload > p { font-size: 13px; line-height: 1.6; color: var(--muted); }
+.sync-import-link { display: inline-block; margin-bottom: 12px; color: var(--forest); text-decoration: underline; font-size: 14px; }
+@media (max-width: 580px) { .sync-dates { grid-template-columns: 1fr; } .import-card { padding: 28px 20px; } }
 @media (max-width: 580px) {
   .identity-row { grid-template-columns: 1fr; }
   .identity-remove { justify-self: start; }
