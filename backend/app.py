@@ -6,6 +6,7 @@ from io import TextIOWrapper
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import quote
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +27,7 @@ from chesslab.models import GameRecord
 from chesslab.openings import OpeningCatalog
 from chesslab.storage import SQLiteGameStorage
 from chesslab.postgres import PostgresGameStorage
+from chesslab.social import CommunityStorage
 from chesslab.theory import assess_pgn_opening, first_major_mistake, opening_move_path
 
 
@@ -327,6 +329,12 @@ StorageDependency = Annotated[SQLiteGameStorage, Depends(get_storage)]
 def authorize_api(request: Request, storage: StorageDependency) -> None:
     if request.url.path == "/health":
         return
+    # Exact, read-only routes return opt-in projections, never private library data.
+    route = request.scope.get('route')
+    if request.method == 'GET' and getattr(route, 'path', '') in {
+        '/api/community', '/api/community/profiles/{profile_id}', '/api/community/games/{share_id}',
+    }:
+        return
     # All API routes inherit this dependency, including future additions.
     principal = get_principal(request)
     request.state.principal = principal
@@ -345,11 +353,99 @@ def authorize_api(request: Request, storage: StorageDependency) -> None:
 
 
 app = FastAPI(title=APP_NAME, dependencies=[Depends(authorize_api)])
+
+
+@app.middleware('http')
+async def community_cache_policy(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith(('/api/community', '/api/account/sharing')):
+        response.headers['Cache-Control'] = 'private, no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
+
+
+class CommunityProfileInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    name: str = Field(min_length=1, max_length=60)
+    bio: str = Field(default='', max_length=240)
+    visible: bool = Field(strict=True)
+
+
+class CommunityShareInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    caption: str = Field(default='', max_length=280)
+
+
+def sharing_owner(request: Request) -> int:
+    if request.state.user_id is None:
+        raise HTTPException(409, 'Community publishing requires Google sign-in.')
+    return request.state.user_id
+
+
+@app.get('/api/account/sharing')
+def sharing_settings(request: Request, storage: StorageDependency):
+    return CommunityStorage(storage).settings(sharing_owner(request))
+
+
+@app.put('/api/account/sharing')
+def save_sharing_settings(request: Request, details: CommunityProfileInput, storage: StorageDependency):
+    return CommunityStorage(storage).save_profile(sharing_owner(request), details.name, details.bio, details.visible)
+
+
+@app.get('/api/account/sharing/games')
+def sharing_library(request: Request, storage: StorageDependency,
+                    limit: int = Query(20, ge=1, le=40), offset: int = Query(0, ge=0, le=1000000)):
+    return CommunityStorage(storage).library(sharing_owner(request), limit, offset)
+
+
+@app.put('/api/account/sharing/games/{game_id}')
+def publish_game(request: Request, game_id: int, details: CommunityShareInput, storage: StorageDependency):
+    try:
+        result = CommunityStorage(storage).share(sharing_owner(request), game_id, details.caption)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    if result is None:
+        raise HTTPException(404, 'Game not found.')
+    return result
+
+
+@app.delete('/api/account/sharing/games/{game_id}')
+def unpublish_game(request: Request, game_id: int, storage: StorageDependency):
+    if not CommunityStorage(storage).unshare(sharing_owner(request), game_id):
+        raise HTTPException(404, 'Game not found.')
+    return {'removed': True}
+
+
+@app.get('/api/community')
+def community(storage: StorageDependency, limit: int = Query(20, ge=1, le=40),
+              offset: int = Query(0, ge=0, le=1000000), people_offset: int = Query(0, ge=0, le=1000000)):
+    social = CommunityStorage(storage)
+    return {'games': social.public_games(limit, offset), 'profiles': social.profiles(limit, people_offset)}
+
+
+@app.get('/api/community/profiles/{profile_id}')
+def community_profile(profile_id: UUID, storage: StorageDependency,
+                      limit: int = Query(20, ge=1, le=40), offset: int = Query(0, ge=0, le=1000000)):
+    social = CommunityStorage(storage)
+    profiles = social.profiles(profile_id=str(profile_id))
+    if not profiles:
+        raise HTTPException(404, 'Profile not found or no longer public.')
+    return {'profile': profiles[0], 'games': social.public_games(limit, offset, profile_id=str(profile_id))}
+
+
+@app.get('/api/community/games/{share_id}')
+def community_game(share_id: UUID, storage: StorageDependency):
+    games = CommunityStorage(storage).public_games(share_id=str(share_id), limit=1)
+    if not games:
+        raise HTTPException(404, 'Game not found or no longer shared.')
+    return games[0]
+
+
 app.add_middleware(RequestSizeLimit)
 allowed_origins = os.environ.get("CHESSLAB_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
 app.add_middleware(CORSMiddleware,
     allow_origins=[origin.strip() for origin in allowed_origins if origin.strip()],
-    allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_credentials=False, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 

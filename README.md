@@ -23,6 +23,9 @@ different openings, and explore the moves behind those results.
   you want to try.
 - **Use multiple chess identities:** correct a username or add names from Lichess,
   Chess.com, and other PGN sources without re-uploading existing games.
+- **Study together:** opt into a public community profile and share selected games
+  with captions and move-by-move replay. Share a game link in Discord, or browse
+  what other players deliberately published.
 
 ## Accounts and imports
 
@@ -30,7 +33,15 @@ Your Google sign-in identifies your Chess Lab account. Your chess usernames iden
 which side you played in imported games; they do not verify ownership of a chess
 account or give access to another user's library.
 
-Hosted libraries, statistics, and study notes are private. Multiple saved usernames
+Hosted libraries, statistics, and study notes are private by default. The
+[community](https://chess-lab-zeta.vercel.app/community) shows only opt-in profiles
+and individually published game snapshots. Public game pages include player names,
+ratings, date, result, opening, time control, source platform, and mainline moves;
+they exclude PGN comments, variations, and private study notes. You can unshare any
+game. Hiding your profile removes all its shares without deleting your private games,
+and re-enabling it does not republish them. Public content can be copied by visitors.
+
+Multiple saved usernames
 contribute to combined personal statistics. Games where neither side—or both
 sides—matches your saved identities remain in your library but are excluded from
 personal statistics.
@@ -138,7 +149,7 @@ PostgreSQL 17 and runs those tests too. Do not use your production database for 
 From `frontend`:
 
 ```powershell
-node --experimental-strip-types --test tests/security.test.mjs tests/chesscom-sync.test.mjs
+node --experimental-strip-types --test tests/security.test.mjs tests/chesscom-sync.test.mjs tests/community.test.mjs
 pnpm run build:vercel
 ```
 
@@ -162,7 +173,8 @@ production database URLs, or private game archives.
 ## Beta limitations
 
 - No scheduled syncing or persistent background import jobs yet.
-- No shared libraries, public profiles, or social feed.
+- Community sharing is opt-in and limited to 100 games per account. No followers,
+  comments, messaging, full-library sharing, or verified chess-account badges yet.
 - PGN uploads are limited to 10 MiB and 5,000 games per upload.
 - Engine review is disabled in the hosted beta; opening statistics and saved study
   positions do not require an engine.

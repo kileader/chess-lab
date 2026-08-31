@@ -539,3 +539,171 @@ def test_lichess_split_and_failure_do_not_write_partial_batches(accounts, monkey
     assert storage.count_games(owner_user_id=user_id) == 1
     monkeypatch.setattr('chesslab.lichess.batch_records', lambda *args: ([record], 0, []))
     assert client.post(endpoint, headers=headers, json={**body, **windows[0]}).json()['duplicates_skipped'] == 1
+
+
+def community_fixture(client, storage):
+    headers = {'Authorization': 'Bearer alice'}
+    owner = client.post('/api/account', headers=headers, json={
+        'display_name': 'PRIVATE ACCOUNT NAME', 'platform': 'lichess', 'username': 'Alice',
+    }).json()['id']
+    record = load_game_records(Path(__file__).parent / 'fixtures' / 'normal_game.pgn')[0]
+    record = replace(record, pgn=record.pgn.replace('1. e4', '1. e4 {PRIVATE COMMENT} (1. d4 d5)')
+                     .replace('[Event "Chess Lab Test"]', '[Event "PRIVATE EVENT"]\n[Annotator "PRIVATE ANNOTATOR"]'),
+                     source_url='https://example.test/PRIVATE-URL')
+    storage.import_games([record], owner_user_id=owner)
+    game_id = client.get('/api/account/sharing/games', headers=headers).json()['games'][0]['id']
+    return headers, owner, game_id
+
+
+def test_community_is_opt_in_and_only_publishes_safe_projection(accounts):
+    client, storage = accounts
+    headers, owner, game_id = community_fixture(client, storage)
+    assert client.get('/api/account/sharing', headers=headers).json() == {
+        'public_id': None, 'name': '', 'bio': '', 'visible': False,
+    }
+    assert client.get('/api/community').json() == {'games': [], 'profiles': []}
+    endpoint = f'/api/account/sharing/games/{game_id}'
+    assert client.put(endpoint, headers=headers, json={}).status_code == 422
+    profile = client.put('/api/account/sharing', headers=headers, json={
+        'name': 'Public Alice', 'bio': 'Learning the Philidor.', 'visible': True,
+    }).json()
+    assert client.get('/api/community').json()['games'] == []
+    share = client.put(endpoint, headers=headers, json={'caption': 'My favorite finish.'}).json()['public_id']
+    response = client.get(f'/api/community/games/{share}')
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == 'private, no-store'
+    game = response.json()
+    assert game['name'] == 'Public Alice'
+    assert game['profile_id'] == profile['public_id']
+    assert game['moves'][0] == '1. e4'
+    assert len(game['positions']) == len(game['moves']) + 1 == 8
+    assert game['white_elo'] == 1500
+    assert game['caption'] == 'My favorite finish.'
+    assert not {'user_id', 'game_id', 'owner_user_id', 'pgn', 'site', 'source_url', 'fingerprint', 'identities', 'subject'} & game.keys()
+    assert 'PRIVATE' not in response.text
+    public = client.get('/api/community').json()
+    assert len(public['games']) == 1
+    assert 'positions' not in public['games'][0] and 'moves' not in public['games'][0]
+    assert public['profiles'][0]['shared_games'] == 1
+    # Public visibility does not grant access to any private route.
+    assert client.get('/api/games').status_code == 401
+    assert client.get(f'/api/users/{owner}/overview').status_code == 401
+    assert storage.count_games(owner_user_id=owner) == 1
+
+
+def test_community_cross_account_mutations_and_owner_spoofing_are_rejected(accounts):
+    client, storage = accounts
+    alice, owner, game_id = community_fixture(client, storage)
+    bob = {'Authorization': 'Bearer bob'}
+    client.get('/api/account', headers=bob)
+    profile_body = {'name': 'Public Alice', 'bio': '', 'visible': True}
+    profile = client.put('/api/account/sharing', headers=alice, json=profile_body).json()
+    endpoint = f'/api/account/sharing/games/{game_id}'
+    share = client.put(endpoint, headers=alice, json={}).json()['public_id']
+    for headers in ({}, bob):
+        expected = 401 if not headers else 404
+        assert client.put(endpoint, headers=headers, json={}).status_code == expected
+        assert client.delete(endpoint, headers=headers).status_code == expected
+    assert client.put('/api/account/sharing', json=profile_body).status_code == 401
+    assert client.get('/api/account/sharing/games', headers=bob).json()['total'] == 0
+    assert client.put('/api/account/sharing', headers=bob, json={**profile_body, 'user_id': owner}).status_code == 422
+    assert client.put(endpoint, headers=alice, json={'owner_user_id': owner}).status_code == 422
+    assert client.put(endpoint, headers=alice, json={'caption': 'x' * 281}).status_code == 422
+    assert client.put('/api/account/sharing', headers=alice, json={**profile_body, 'visible': 'true'}).status_code == 422
+    assert client.put('/api/account/sharing', headers=alice, json={**profile_body, 'name': '   '}).status_code == 422
+    assert client.get(f'/api/community/games/{share}').status_code == 200
+    assert client.get(f'/api/community/profiles/{profile["public_id"]}').status_code == 200
+    for path in ['/api/community?limit=1000', '/api/community?offset=-1', '/api/community?people_offset=-1']:
+        assert client.get(path).status_code == 422
+    for method in ('post', 'put', 'delete', 'patch'):
+        assert getattr(client, method)('/api/community').status_code == 405
+    assert client.get('/api/community/games/not-an-id').status_code == 422
+    assert client.get('/api/community/profiles/' + str(uuid4())).status_code == 404
+    preflight = client.options('/api/account/sharing', headers={
+        'Origin': 'http://localhost:3000', 'Access-Control-Request-Method': 'PUT',
+        'Access-Control-Request-Headers': 'authorization,content-type',
+    })
+    assert preflight.status_code == 200
+
+
+def test_unsharing_and_hiding_revoke_access_without_deleting_private_data(accounts):
+    client, storage = accounts
+    headers, owner, game_id = community_fixture(client, storage)
+    body = {'name': 'Alice', 'bio': '', 'visible': True}
+    profile = client.put('/api/account/sharing', headers=headers, json=body).json()['public_id']
+    endpoint = f'/api/account/sharing/games/{game_id}'
+    share = client.put(endpoint, headers=headers, json={'caption': 'First'}).json()['public_id']
+    assert client.put(endpoint, headers=headers, json={'caption': 'Updated'}).json()['public_id'] == share
+    assert len(client.get('/api/community').json()['games']) == 1
+    assert client.get(f'/api/community/games/{share}').json()['caption'] == 'Updated'
+    storage.save_repertoire_items(owner, [{'context': 'As White', 'opening': 'Philidor Defense', 'status': 'try', 'note': 'PRIVATE STUDY'}])
+    assert client.delete(endpoint, headers=headers).status_code == 200
+    assert client.delete(endpoint, headers=headers).status_code == 200
+    assert client.get(f'/api/community/games/{share}').status_code == 404
+    new_share = client.put(endpoint, headers=headers, json={}).json()['public_id']
+    assert new_share != share
+    assert client.put('/api/account/sharing', headers=headers, json={**body, 'visible': False}).status_code == 200
+    assert client.get(f'/api/community/games/{new_share}').status_code == 404
+    assert client.get(f'/api/community/profiles/{profile}').status_code == 404
+    assert client.get('/api/community').json() == {'games': [], 'profiles': []}
+    assert client.put('/api/account/sharing', headers=headers, json=body).json()['public_id'] == profile
+    assert client.get('/api/community').json()['games'] == []
+    assert client.get('/api/account/sharing/games', headers=headers).json()['games'][0]['share_id'] is None
+    assert storage.count_games(owner_user_id=owner) == 1
+    assert storage.get_user_repertoire(owner)[0]['note'] == 'PRIVATE STUDY'
+
+
+def test_community_snapshot_validation_and_bounded_pagination(accounts):
+    client, storage = accounts
+    headers, owner, game_id = community_fixture(client, storage)
+    client.put('/api/account/sharing', headers=headers, json={'name': '<script>not HTML</script>', 'visible': True})
+    endpoint = f'/api/account/sharing/games/{game_id}'
+    with storage._connect() as connection:
+        connection.execute('UPDATE games SET pgn = ? WHERE id = ?', ('x' * (128 * 1024 + 1), game_id))
+    assert client.put(endpoint, headers=headers, json={}).status_code == 422
+    assert client.get('/api/community').json()['games'] == []
+    assert client.get('/api/community?people_offset=1').json()['profiles'] == []
+    assert client.get('/api/account/sharing/games?offset=1', headers=headers).json() == {'total': 1, 'games': []}
+    assert client.get('/api/account/sharing/games?limit=41', headers=headers).status_code == 422
+    assert storage.count_games(owner_user_id=owner) == 1
+
+
+def test_community_share_limit_and_original_ownership_are_enforced(accounts):
+    client, storage = accounts
+    headers, owner, game_id = community_fixture(client, storage)
+    client.put('/api/account/sharing', headers=headers, json={'name': 'Alice', 'visible': True})
+    record = load_game_records(Path(__file__).parent / 'fixtures' / 'normal_game.pgn')[0]
+    storage.import_games([replace(record, fingerprint=f'community-limit-{i}', source_game_id=None) for i in range(101)], owner_user_id=owner)
+    from chesslab.social import CommunityStorage
+    social = CommunityStorage(storage)
+    with storage._connect() as connection:
+        ids = [row['id'] for row in connection.execute('SELECT id FROM games WHERE owner_user_id = ? ORDER BY id', (owner,)).fetchall()]
+    for selected in ids[:100]:
+        social.share(owner, selected, '')
+    assert client.put(f'/api/account/sharing/games/{ids[100]}', headers=headers, json={}).status_code == 422
+    # Updates at the cap are allowed and don't bump or duplicate a post.
+    existing = social.share(owner, game_id, 'Updated at the limit')['public_id']
+    assert len(client.get('/api/community?limit=40').json()['games']) == 40
+    assert len(client.get('/api/community?offset=100').json()['games']) == 0
+    assert len(client.get('/api/community?offset=80').json()['games']) == 20
+    assert client.get('/api/community').json()['profiles'][0]['shared_games'] == 100
+    # Defensive public query gate, even if administrative tooling changes ownership.
+    other = storage.ensure_account('another-test-subject')
+    with storage._connect() as connection:
+        connection.execute('UPDATE games SET owner_user_id = ? WHERE id = ?', (other, game_id))
+    assert client.get(f'/api/community/games/{existing}').status_code == 404
+    assert client.get('/api/community').json()['profiles'][0]['shared_games'] == 99
+
+
+def test_legacy_local_accounts_cannot_publish_community(accounts, monkeypatch):
+    client, storage = accounts
+    monkeypatch.setattr('backend.app.get_principal', lambda request: None)
+    for method, path, body in [
+        ('get', '/api/account/sharing', None),
+        ('put', '/api/account/sharing', {'name': 'Local', 'visible': True}),
+        ('get', '/api/account/sharing/games', None),
+        ('put', '/api/account/sharing/games/1', {}),
+        ('delete', '/api/account/sharing/games/1', None),
+    ]:
+        assert client.request(method, path, json=body).status_code == 409
+    assert client.get('/api/community').json() == {'games': [], 'profiles': []}

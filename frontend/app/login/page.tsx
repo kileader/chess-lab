@@ -12,5 +12,6 @@ export default async function Login({ searchParams }: { searchParams: Promise<Re
     {params.reason && <p role="alert">{params.reason === 'expired' ? 'Your session expired. Please sign in again.' : 'Sign-in did not complete. Please try again.'}</p>}
     {authEnabled() ? <a className="auth-button" href="/auth/login">Continue with Google</a> : <><p>Google sign-in is not enabled in this local preview.</p><Link href="/">Return to your local dashboard →</Link></>}
     <small>No chess-platform password is needed. Your library stays private.</small>
+    <p><Link className="sync-import-link" href="/community">Browse publicly shared games →</Link></p>
   </section></main>;
 }

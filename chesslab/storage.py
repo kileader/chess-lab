@@ -11,6 +11,7 @@ import chess.pgn
 
 from chesslab.models import GameRecord
 from chesslab.identities import validate_chess_username
+from chesslab.social import SOCIAL_SCHEMA
 
 
 CREATE_GAMES_TABLE = """
@@ -188,6 +189,8 @@ class SQLiteGameStorage:
         connection.execute(CREATE_PRACTICE_POSITIONS_TABLE)
         connection.execute(CREATE_ACCOUNTS_TABLE)
         connection.execute(CREATE_ACCOUNT_IDENTITIES_TABLE)
+        for statement in SOCIAL_SCHEMA:
+            connection.execute(statement)
         identity_pk = [row['name'] for row in sorted(
             connection.execute('PRAGMA table_info(account_player_identities)'), key=lambda row: row['pk']) if row['pk']]
         identity_schema = connection.execute("SELECT sql FROM sqlite_master WHERE name = 'account_player_identities'").fetchone()['sql']

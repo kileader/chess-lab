@@ -8,12 +8,12 @@
 - Railway runs FastAPI with PostgreSQL. The API validates bearer tokens directly
   with Supabase before trusting identity. It never trusts a browser-supplied user ID.
 - Accounts are provisioned by stable Supabase user ID, never chess username or email.
-- Every API user route checks ownership. Global user listing/creation is unavailable
+- Every private API user route checks ownership. Global user listing/creation is unavailable
   to signed-in hosted users. Imports, deduplication, examples, notes and plans are private.
 - Anyone can register with a verified sign-in when `CHESSLAB_ALLOWED_EMAILS` is
   empty or unset. An optional server-side email allowlist can restrict access.
-  Open registration does not expose libraries: no public social feed or automatic
-  game sharing is enabled in this release.
+  Open registration does not expose libraries. The community exposes only separately
+  opted-in profiles and games individually published by their owners.
 
 ## External setup required
 
@@ -101,7 +101,7 @@ lists matching monthly archives; the browser then requests each month sequential
 newest first. Keep the import page open. Stop finishes the current request and
 prevents subsequent month requests. Successful months are committed to the verified
 account's private library using the existing import/deduplication pipeline. There
-is no shared library or account impersonation. An interrupted run can be retried;
+  is no automatic sharing or account impersonation. An interrupted run can be retried;
 it skips games already saved, including before an uncertain network response.
 
 Endpoints: `POST /api/games/sync/chess-com/plan` and `/month`. Both require a saved
@@ -145,6 +145,53 @@ Speed and standard-chess filtering happen locally. Consequently a plan can conta
 months with no games matching the chosen speed. The response has a 12 MiB limit,
 each selected PGN has a 128 KiB limit, and invalid streams/games abort the batch.
 No new credentials, service, schema changes, or environment variables are required.
+
+## Opt-in community
+
+`/community` is a public, paginated feed of shared games and public profiles.
+`/community/sharing` requires Google sign-in and manages a separate public name,
+optional bio, and explicit visibility checkbox. No existing account is opted in by
+the migration. Public names are self-selected, not verified chess identities.
+
+Users choose individual games from their own imported library and explicitly click
+**Share this game publicly**. Publishing saves an allowlisted snapshot: player names,
+ratings, date, result, opening, time control, source platform, mainline SAN moves and
+FEN positions. It excludes raw PGN, comments, side variations, source URLs, private
+notes, fingerprints, Google identity, and internal owner/game IDs. A caption is
+explicitly public. No external requests or engine analysis are needed for replay.
+
+Public URLs use random UUIDs: `/community/players/<id>` and
+`/community/games/<id>`. Visitors do not need an account. These are discoverable
+community posts, not secret/unlisted links. Public responses and rendered pages are
+not cached; detail-page metadata uses only the published record and clears inherited
+preview images. Revocation cannot remove screenshots, copies, or previews retained
+by other services.
+
+Unshare removes the public snapshot without deleting the private game. Hiding a
+profile transactionally deletes all its game shares; making the profile visible
+again never restores them. These changes and publishing take the same owner-row
+lock used by account identity edits and imports. Repeated publishing updates the
+existing share rather than creating duplicate posts or bumping it in the feed.
+
+Only three exact GET route templates bypass API authentication:
+`/api/community`, `/api/community/profiles/{profile_id}`, and
+`/api/community/games/{share_id}`. All publishing operations use the verified account
+through `/api/account/sharing` and `/api/account/sharing/games/{game_id}`. Public SQL
+queries require both a visible profile and an owner match against the source game.
+Changing a chess username never grants control of another person's shares.
+
+Migration `004_community_sharing.sql` creates the two additive PostgreSQL tables and
+feed index. Railway applies it before startup. SQLite creates equivalent tables on
+connection. No new secrets, provider setup, or paid services are needed. Limits:
+40 rows per page, 100 shared games per account, 60-character names, 240-character
+bios, 280-character captions, 128 KiB source PGNs and 1,000 mainline half-moves per
+share. Local-auth legacy libraries cannot be published.
+
+The initial community has no followers, comments, chat, automatic sharing, or chess
+account verification. Public publishing needs further moderation/reporting and abuse
+controls before a broad launch beyond the trusted beta group. Backend regression
+tests exercise opt-in defaults, cross-account denial, projection sanitization,
+revocation, re-enabling, malformed input, and pagination on SQLite and PostgreSQL.
 
 ## Preserve Kevin's current data
 
