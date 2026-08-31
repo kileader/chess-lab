@@ -3,7 +3,6 @@
 import io
 import json
 import math
-import re
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
@@ -11,6 +10,7 @@ from pathlib import Path
 import chess.pgn
 
 from chesslab.models import GameRecord
+from chesslab.identities import validate_chess_username
 
 
 CREATE_GAMES_TABLE = """
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE_ACCOUNT_IDENTITIES_TABLE = """
 CREATE TABLE IF NOT EXISTS account_player_identities (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    platform TEXT NOT NULL CHECK(platform IN ('lichess', 'chess_com')),
+    platform TEXT NOT NULL CHECK(platform IN ('lichess', 'chess_com', 'other')),
     username TEXT NOT NULL,
     username_normalized TEXT NOT NULL,
     PRIMARY KEY (user_id, platform, username_normalized)
@@ -162,6 +162,8 @@ class SQLiteGameStorage:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
+        # SQLite's built-in LOWER is ASCII-only; PGN names may contain accents.
+        connection.create_function('lower', 1, lambda value: value.lower() if value is not None else None, deterministic=True)
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(CREATE_GAMES_TABLE)
         existing_columns = {
@@ -188,8 +190,9 @@ class SQLiteGameStorage:
         connection.execute(CREATE_ACCOUNT_IDENTITIES_TABLE)
         identity_pk = [row['name'] for row in sorted(
             connection.execute('PRAGMA table_info(account_player_identities)'), key=lambda row: row['pk']) if row['pk']]
-        if identity_pk == ['user_id', 'platform']:
-            # SQLite cannot alter a primary key. Copy every identity atomically.
+        identity_schema = connection.execute("SELECT sql FROM sqlite_master WHERE name = 'account_player_identities'").fetchone()['sql']
+        if identity_pk == ['user_id', 'platform'] or "'other'" not in identity_schema:
+            # SQLite cannot alter keys/checks. Copy every identity atomically.
             if not connection.in_transaction:
                 connection.execute('BEGIN IMMEDIATE')
             connection.execute(CREATE_ACCOUNT_IDENTITIES_TABLE.replace('account_player_identities', 'account_player_identities_v2'))
@@ -315,14 +318,15 @@ class SQLiteGameStorage:
 
     def configure_account(self, user_id: int, display_name: str, platform: str, username: str) -> None:
         """Set an analysis identity; it grants access only to this account's imports."""
+        username = validate_chess_username(platform, username)
         with self._connect() as connection:
             self._lock_account(connection, user_id)
             existing = connection.execute("SELECT platform, username_normalized FROM account_player_identities WHERE user_id = ?", (user_id,)).fetchone()
-            if existing and (existing["platform"] != platform or existing["username_normalized"] != username.casefold()):
+            if existing and (existing["platform"] != platform or existing["username_normalized"] != username.lower()):
                 raise ValueError("Your profile is already set up. Use account settings to change your usernames.")
             connection.execute("UPDATE users SET display_name = ? WHERE id = ?", (display_name, user_id))
             connection.execute("""INSERT INTO account_player_identities (user_id, platform, username, username_normalized)
-                VALUES (?, ?, ?, ?) ON CONFLICT(user_id, platform, username_normalized) DO NOTHING""", (user_id, platform, username, username.casefold()))
+                VALUES (?, ?, ?, ?) ON CONFLICT(user_id, platform, username_normalized) DO NOTHING""", (user_id, platform, username, username.lower()))
             self._relink_owned_games(connection, user_id)
 
     @staticmethod
@@ -357,14 +361,13 @@ class SQLiteGameStorage:
         normalized = []
         seen = set()
         for identity in identities:
-            platform, username = identity['platform'], identity['username'].strip()
-            if platform not in {'lichess', 'chess_com'} or not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', username):
-                raise ValueError('Choose a valid platform and chess username.')
-            key = (platform, username.casefold())
+            platform = identity['platform']
+            username = validate_chess_username(platform, identity['username'])
+            key = (platform, username.lower())
             if key in seen:
                 raise ValueError('Each username can appear only once per platform (ignoring capitalization).')
             seen.add(key)
-            normalized.append((user_id, platform, username, username.casefold()))
+            normalized.append((user_id, platform, username, username.lower()))
         with self._connect() as connection:
             self._lock_account(connection, user_id)
             if not connection.execute('SELECT user_id FROM accounts WHERE user_id = ?', (user_id,)).fetchone():

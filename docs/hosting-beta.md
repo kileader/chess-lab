@@ -59,9 +59,13 @@ Production refuses local-auth bypass. Local preview remains direct loopback-only
 ### Editable chess usernames
 
 Signed-in users can open **Usernames** in the account menu (`/settings`) to correct
-names, add accounts on either platform, or remove obsolete names. At least one and
+names, add Lichess, Chess.com, or Other identities, or remove obsolete names. At least one and
 at most ten usernames are required. Multiple names on the same platform are allowed;
 case-insensitive duplicates within a platform are rejected.
+Other accepts PGN player names up to 80 printable characters (including spaces,
+punctuation, and accents), matching only imports whose detected source is `other`.
+It is not a wildcard for Lichess or Chess.com. Site usernames retain their existing
+40-character letters/numbers/underscore/hyphen validation.
 
 `PATCH /api/account/identities` accepts an `identities` list of `{platform, username}`.
 The target account is always taken from the verified session, never the payload.
@@ -77,9 +81,10 @@ The user's own usernames contribute to combined stats; per-player libraries are 
 implemented. Imports with zero single-side matches include a settings reminder.
 
 Migration `002_multiple_chess_identities.sql` expands the PostgreSQL identity primary
-key without deleting rows. Ensure Railway's **Pre-deploy Command** is
+key without deleting rows. Migration `003_other_chess_identities.sql` expands the
+platform constraint while preserving identities. Ensure Railway's **Pre-deploy Command** is
 `python -m backend.migrate` and verify `Database migrations complete.` before testing
-the settings page. SQLite performs an atomic table-copy upgrade of the older key.
+the settings page. SQLite performs an atomic table-copy upgrade of older keys/checks.
 PostgreSQL tests cover both fresh schemas and upgrading existing identity records.
 
 ## Preserve Kevin's current data

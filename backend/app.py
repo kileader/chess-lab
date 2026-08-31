@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 import chess
 
@@ -18,6 +18,7 @@ from backend.request_limits import RequestSizeLimit
 from chesslab import APP_NAME
 from chesslab.explorer import explore_position
 from chesslab.importer import iter_game_records
+from chesslab.identities import validate_chess_username
 from chesslab.models import GameRecord
 from chesslab.openings import OpeningCatalog
 from chesslab.storage import SQLiteGameStorage
@@ -352,13 +353,18 @@ app.add_middleware(CORSMiddleware,
 
 class ChessIdentityInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    platform: Literal["lichess", "chess_com"]
-    username: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
+    platform: Literal["lichess", "chess_com", "other"]
+    username: str = Field(min_length=1, max_length=80)
 
     @field_validator('username', mode='before')
     @classmethod
     def trim_username(cls, value):
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator('username')
+    @classmethod
+    def validate_username(cls, value: str, info: ValidationInfo) -> str:
+        return validate_chess_username(info.data.get('platform', ''), value)
 
 
 class AccountSetup(ChessIdentityInput):
@@ -432,7 +438,7 @@ async def import_games(
         raise HTTPException(409, "Set your chess username before importing games.")
     await file.seek(0)
     pgn_stream = TextIOWrapper(file.file, encoding="utf-8-sig")
-    identity_keys = {(identity['platform'], identity['username'].casefold()) for identity in identities}
+    identity_keys = {(identity['platform'], identity['username'].lower()) for identity in identities}
     matched_games = 0
     try:
         def bounded_games():
@@ -440,8 +446,8 @@ async def import_games(
             for index, game in enumerate(iter_game_records(pgn_stream, default_opening_catalog)):
                 if index >= 5000:
                     raise HTTPException(413, "Import at most 5,000 games at a time.")
-                white_matches = (game.source, (game.white or '').casefold()) in identity_keys
-                black_matches = (game.source, (game.black or '').casefold()) in identity_keys
+                white_matches = (game.source, (game.white or '').lower()) in identity_keys
+                black_matches = (game.source, (game.black or '').lower()) in identity_keys
                 if white_matches != black_matches:
                     matched_games += 1
                 yield game

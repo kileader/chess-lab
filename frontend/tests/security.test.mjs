@@ -27,3 +27,12 @@ test('Recent game outcomes match multiple usernames, platforms, and one side onl
   assert.equal(gameOutcome({ ...game, result: '*' }, identities), 'Unscored');
   assert.equal(gameOutcome({ ...game, source: 'chess_com', black: 'Gamma' }, identities), 'Win');
 });
+
+test('Other matches PGN player names without matching known platforms', () => {
+  const identities = [{ platform: 'other', username: 'O’Connor, José' }];
+  const game = { source: 'other', white: 'O’CONNOR, JOSÉ', black: 'Opponent', result: '1-0' };
+  assert.equal(gameOutcome(game, identities), 'Win');
+  assert.equal(gameOutcome({ ...game, source: 'lichess' }, identities), 'Unscored');
+  assert.equal(gameOutcome({ ...game, source: 'chess_com' }, identities), 'Unscored');
+  assert.equal(gameOutcome({ ...game, black: 'O’Connor, José' }, identities), 'Unscored');
+});

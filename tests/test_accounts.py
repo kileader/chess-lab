@@ -293,7 +293,9 @@ def test_identity_update_validation_and_atomic_rollback(accounts, monkeypatch):
     identity = {'platform': 'lichess', 'username': 'Alice'}
     invalid = [[], [identity] * 11, [identity, {**identity, 'username': 'alice'}],
                [{**identity, 'username': 'a b'}], [{**identity, 'username': ' '}],
-               [{**identity, 'platform': 'other'}]]
+               [{**identity, 'platform': 'unsupported'}], [{**identity, 'username': 'a' * 41}]]
+    invalid.extend([[{'platform': 'other', 'username': name}] for name in (' ', 'a' * 81, 'A\nB', 'A\x00B')])
+    invalid.append([{'platform': 'other', 'username': 'José Smith'}, {'platform': 'other', 'username': 'JOSÉ SMITH'}])
     for identities in invalid:
         assert client.patch('/api/account/identities', headers=headers, json={'identities': identities}).status_code == 422
     assert client.patch('/api/account/identities', json={'identities': [identity]}).status_code == 401
@@ -320,20 +322,79 @@ def test_import_reports_no_matches_then_username_correction_finds_games(accounts
     assert client.post('/api/games/import', headers=headers, files={'file': ('game.pgn', pgn)}).json()['matched_games'] == 1
 
 
-def test_sqlite_identity_primary_key_upgrade_preserves_existing_rows(tmp_path):
+@pytest.mark.parametrize('old_primary_key', [True, False])
+def test_sqlite_identity_primary_key_upgrade_preserves_existing_rows(tmp_path, old_primary_key):
     path = tmp_path / 'old-identities.db'
     with sqlite3.connect(path) as connection:
         connection.execute(CREATE_USERS_TABLE)
         connection.execute(CREATE_ACCOUNTS_TABLE)
-        connection.execute(CREATE_ACCOUNT_IDENTITIES_TABLE.replace('PRIMARY KEY (user_id, platform, username_normalized)', 'PRIMARY KEY (user_id, platform)'))
+        old_schema = CREATE_ACCOUNT_IDENTITIES_TABLE.replace(", 'other'", '')
+        if old_primary_key:
+            old_schema = old_schema.replace('PRIMARY KEY (user_id, platform, username_normalized)', 'PRIMARY KEY (user_id, platform)')
+        connection.execute(old_schema)
         connection.execute("INSERT INTO users(id, display_name) VALUES (1, 'Alice')")
         connection.execute("INSERT INTO accounts(subject, user_id) VALUES ('alice', 1)")
         connection.execute("INSERT INTO account_player_identities VALUES (1, 'lichess', 'Alice', 'alice')")
     storage = SQLiteGameStorage(path)
     identity = {'platform': 'lichess', 'username': 'Alice'}
     assert storage.get_user_profile(1)['identities'] == [identity]
-    storage.update_account_identities(1, [identity, {**identity, 'username': 'Alt'}])
-    assert len(storage.get_user_profile(1)['identities']) == 2
+    storage.update_account_identities(1, [identity, {**identity, 'username': 'Alt'}, {'platform': 'other', 'username': 'Smith, Alice'}])
+    assert len(storage.get_user_profile(1)['identities']) == 3
+
+
+def test_other_identity_onboarding_import_and_correction(accounts):
+    client, storage = accounts
+    alice = {'Authorization': 'Bearer alice'}
+    bob = {'Authorization': 'Bearer bob'}
+    profile = {'display_name': 'Alice', 'platform': 'other', 'username': "  O’Connor, José  "}
+    response = client.post('/api/account', headers=alice, json=profile)
+    assert response.status_code == 200
+    a = response.json()['id']
+    assert response.json()['identities'] == [{'platform': 'other', 'username': "O’Connor, José"}]
+    b = client.post('/api/account', headers=bob, json=profile).json()['id']
+    fixture = (Path(__file__).parent / 'fixtures' / 'normal_game.pgn').read_text()
+    pgn = fixture.replace('[White "Alice"]', '[White "O’CONNOR, JOSÉ"]')
+    black_pgn = fixture.replace('[Black "Bob"]', '[Black "O’CONNOR, JOSÉ"]')
+    lichess = pgn.replace('[Site "Local"]', '[Site "https://lichess.org/aB3dE5gH"]')
+    chess_com = pgn.replace('[Site "Local"]', '[Site "Chess.com"]')
+    # Other is not a wildcard; both colors match only the two non-site games.
+    imported = client.post('/api/games/import', headers=alice, files={'file': ('games.pgn', '\n\n'.join([pgn, black_pgn, lichess, chess_com]))})
+    assert imported.status_code == 200
+    assert imported.json()['games_added'] == 4
+    assert imported.json()['matched_games'] == 2
+    assert client.get(f'/api/users/{a}/overview', headers=alice).json()['total_games'] == 2
+    assert client.get(f'/api/users/{b}/overview', headers=bob).json()['total_games'] == 0
+    assert client.get('/api/games', headers=bob).json()['total'] == 0
+    renamed = [{'platform': 'other', 'username': 'Wrong name'}, {'platform': 'lichess', 'username': 'Alice'}]
+    assert client.patch('/api/account/identities', headers=alice, json={'identities': renamed}).json()['matched_games'] == 0
+    renamed.append({'platform': 'other', 'username': 'o’connor, josé'})
+    result = client.patch('/api/account/identities', headers=alice, json={'identities': renamed})
+    assert result.status_code == 200
+    assert result.json()['matched_games'] == 2
+    assert result.json()['library_games'] == 4
+    assert storage.count_games(owner_user_id=a) == 4
+    assert client.post('/api/games/import', headers=alice, files={'file': ('game.pgn', pgn)}).json() == {
+        'games_received': 1, 'games_added': 0, 'duplicates_skipped': 1, 'matched_games': 1}
+
+
+def test_postgres_other_platform_upgrade_preserves_existing_rows(account_storage):
+    if not isinstance(account_storage, PostgresGameStorage):
+        return
+    storage = account_storage
+    user_id = storage.ensure_account('other-upgrade')
+    identities = [{'platform': 'lichess', 'username': 'Alice'}, {'platform': 'lichess', 'username': 'Alt'},
+                  {'platform': 'chess_com', 'username': 'Alice'}]
+    storage.update_account_identities(user_id, identities)
+    before = storage.get_user_profile(user_id)['identities']
+    with storage._connect() as connection:
+        connection.execute('ALTER TABLE account_player_identities DROP CONSTRAINT account_player_identities_platform_check')
+        connection.execute("ALTER TABLE account_player_identities ADD CONSTRAINT account_player_identities_platform_check CHECK(platform IN ('lichess', 'chess_com'))")
+        connection.execute("DELETE FROM schema_migrations WHERE name = '003_other_chess_identities.sql'")
+    storage.migrate()
+    storage.migrate()
+    assert storage.get_user_profile(user_id)['identities'] == before
+    storage.update_account_identities(user_id, identities + [{'platform': 'other', 'username': 'Smith, Alice'}])
+    assert len(storage.get_user_profile(user_id)['identities']) == 4
 
 
 def test_postgres_identity_primary_key_upgrade_preserves_existing_rows(account_storage):
