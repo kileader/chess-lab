@@ -3,6 +3,7 @@
 import io
 import json
 import math
+import re
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
@@ -108,7 +109,7 @@ CREATE TABLE IF NOT EXISTS account_player_identities (
     platform TEXT NOT NULL CHECK(platform IN ('lichess', 'chess_com')),
     username TEXT NOT NULL,
     username_normalized TEXT NOT NULL,
-    PRIMARY KEY (user_id, platform)
+    PRIMARY KEY (user_id, platform, username_normalized)
 )
 """
 
@@ -185,6 +186,16 @@ class SQLiteGameStorage:
         connection.execute(CREATE_PRACTICE_POSITIONS_TABLE)
         connection.execute(CREATE_ACCOUNTS_TABLE)
         connection.execute(CREATE_ACCOUNT_IDENTITIES_TABLE)
+        identity_pk = [row['name'] for row in sorted(
+            connection.execute('PRAGMA table_info(account_player_identities)'), key=lambda row: row['pk']) if row['pk']]
+        if identity_pk == ['user_id', 'platform']:
+            # SQLite cannot alter a primary key. Copy every identity atomically.
+            if not connection.in_transaction:
+                connection.execute('BEGIN IMMEDIATE')
+            connection.execute(CREATE_ACCOUNT_IDENTITIES_TABLE.replace('account_player_identities', 'account_player_identities_v2'))
+            connection.execute('INSERT INTO account_player_identities_v2 SELECT * FROM account_player_identities')
+            connection.execute('DROP TABLE account_player_identities')
+            connection.execute('ALTER TABLE account_player_identities_v2 RENAME TO account_player_identities')
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_repertoire_items_user_context "
             "ON repertoire_items(user_id, context)"
@@ -229,6 +240,8 @@ class SQLiteGameStorage:
         games_added = 0
 
         with self._connect() as connection:
+            if owner_user_id is not None:
+                self._lock_account(connection, owner_user_id)
             for game in games:
                 game_row = tuple(getattr(game, column) for column in GAME_COLUMNS)
                 cursor = connection.execute(insert_query, (*game_row, owner_user_id))
@@ -237,16 +250,7 @@ class SQLiteGameStorage:
             if owner_user_id is None:
                 self._link_games_to_identities(connection)
             else:
-                connection.execute("""
-                    INSERT INTO user_games (user_id, game_id, player_color)
-                    SELECT identity.user_id, game.id,
-                        CASE WHEN LOWER(game.white) = identity.username_normalized THEN 'white' ELSE 'black' END
-                    FROM account_player_identities AS identity
-                    JOIN games AS game ON game.owner_user_id = identity.user_id AND game.source = identity.platform
-                    WHERE identity.user_id = ? AND (LOWER(game.white) = identity.username_normalized
-                        OR LOWER(game.black) = identity.username_normalized)
-                    ON CONFLICT DO NOTHING
-                """, (owner_user_id,))
+                self._relink_owned_games(connection, owner_user_id)
 
         return games_received, games_added
 
@@ -312,12 +316,68 @@ class SQLiteGameStorage:
     def configure_account(self, user_id: int, display_name: str, platform: str, username: str) -> None:
         """Set an analysis identity; it grants access only to this account's imports."""
         with self._connect() as connection:
+            self._lock_account(connection, user_id)
             existing = connection.execute("SELECT platform, username_normalized FROM account_player_identities WHERE user_id = ?", (user_id,)).fetchone()
             if existing and (existing["platform"] != platform or existing["username_normalized"] != username.casefold()):
-                raise ValueError("Your chess identity is already set. Contact the beta owner to change it.")
+                raise ValueError("Your profile is already set up. Use account settings to change your usernames.")
             connection.execute("UPDATE users SET display_name = ? WHERE id = ?", (display_name, user_id))
             connection.execute("""INSERT INTO account_player_identities (user_id, platform, username, username_normalized)
-                VALUES (?, ?, ?, ?) ON CONFLICT(user_id, platform) DO NOTHING""", (user_id, platform, username, username.casefold()))
+                VALUES (?, ?, ?, ?) ON CONFLICT(user_id, platform, username_normalized) DO NOTHING""", (user_id, platform, username, username.casefold()))
+            self._relink_owned_games(connection, user_id)
+
+    @staticmethod
+    def _lock_account(connection, user_id: int) -> None:
+        # Serialize imports and identity edits for this account on both databases.
+        connection.execute('UPDATE users SET display_name = display_name WHERE id = ?', (user_id,))
+
+    @staticmethod
+    def _relink_owned_games(connection, user_id: int) -> None:
+        """Rebuild only this owner's links, excluding games matching both sides."""
+        connection.execute('DELETE FROM user_games WHERE user_id = ? AND game_id IN '
+                           '(SELECT id FROM games WHERE owner_user_id = ?)', (user_id, user_id))
+        connection.execute("""
+            INSERT INTO user_games(user_id, game_id, player_color)
+            SELECT ?, game.id,
+                CASE WHEN MAX(CASE WHEN LOWER(game.white) = identity.username_normalized THEN 1 ELSE 0 END) = 1
+                     THEN 'white' ELSE 'black' END
+            FROM games AS game
+            JOIN account_player_identities AS identity
+              ON identity.user_id = game.owner_user_id AND identity.platform = game.source
+            WHERE game.owner_user_id = ?
+            GROUP BY game.id
+            HAVING MAX(CASE WHEN LOWER(game.white) = identity.username_normalized THEN 1 ELSE 0 END)
+                <> MAX(CASE WHEN LOWER(game.black) = identity.username_normalized THEN 1 ELSE 0 END)
+            ON CONFLICT(user_id, game_id) DO UPDATE SET player_color = excluded.player_color
+        """, (user_id, user_id))
+
+    def update_account_identities(self, user_id: int, identities: list[dict[str, str]]) -> dict[str, int]:
+        """Replace an account's username list; keep games and study notes intact."""
+        if not 1 <= len(identities) <= 10:
+            raise ValueError('Save between 1 and 10 chess usernames.')
+        normalized = []
+        seen = set()
+        for identity in identities:
+            platform, username = identity['platform'], identity['username'].strip()
+            if platform not in {'lichess', 'chess_com'} or not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', username):
+                raise ValueError('Choose a valid platform and chess username.')
+            key = (platform, username.casefold())
+            if key in seen:
+                raise ValueError('Each username can appear only once per platform (ignoring capitalization).')
+            seen.add(key)
+            normalized.append((user_id, platform, username, username.casefold()))
+        with self._connect() as connection:
+            self._lock_account(connection, user_id)
+            if not connection.execute('SELECT user_id FROM accounts WHERE user_id = ?', (user_id,)).fetchone():
+                raise ValueError('Username settings require a signed-in account.')
+            connection.execute('DELETE FROM account_player_identities WHERE user_id = ?', (user_id,))
+            for identity in normalized:
+                connection.execute('INSERT INTO account_player_identities '
+                                   '(user_id, platform, username, username_normalized) VALUES (?, ?, ?, ?)', identity)
+            self._relink_owned_games(connection, user_id)
+            total = connection.execute('SELECT COUNT(*) AS total FROM games WHERE owner_user_id = ?', (user_id,)).fetchone()['total']
+            matched = connection.execute('SELECT COUNT(*) AS total FROM user_games link JOIN games game ON game.id = link.game_id '
+                                         'WHERE link.user_id = ? AND game.owner_user_id = ?', (user_id, user_id)).fetchone()['total']
+        return {'library_games': int(total), 'matched_games': int(matched)}
 
     def get_user_profile(self, user_id: int) -> dict[str, object] | None:
         """Return one user and all linked platform identities."""
@@ -333,6 +393,7 @@ class SQLiteGameStorage:
                 SELECT platform, username FROM player_identities WHERE user_id = ?
                 UNION ALL
                 SELECT platform, username FROM account_player_identities WHERE user_id = ?
+                ORDER BY platform, username
                 """,
                 (user_id, user_id),
             ).fetchall()

@@ -344,7 +344,25 @@ footer { display: flex; justify-content: space-between; padding: 25px 0 45px; bo
 .auth-button { display: inline-block; border: 0; border-radius: 10px; background: var(--forest); color: white; padding: 14px 20px; font: inherit; text-decoration: none; cursor: pointer; }
 .auth-button:disabled { opacity: .6; cursor: wait; }
 .auth-card .position-form select { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--card); color: inherit; }
-.account-menu button { background: transparent; border: 0; text-decoration: underline; color: inherit; cursor: pointer; font: inherit; font-size: 12px; }
+.account-menu { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.account-menu form { margin: 0; }
+.account-menu button, .account-menu a { background: transparent; border: 0; text-decoration: underline; color: inherit; cursor: pointer; font: inherit; font-size: 12px; }
+.identity-card { width: min(100%, 720px); }
+.settings-back { display: inline-block; margin-bottom: 24px; color: var(--forest); }
+.identity-form fieldset { min-width: 0; padding: 0; margin: 0; border: 0; }
+.identity-form legend { font-weight: 600; margin-bottom: 16px; }
+.identity-row { display: grid; grid-template-columns: 140px minmax(0, 1fr) auto; align-items: end; gap: 12px; margin-bottom: 16px; }
+.identity-add, .identity-remove { padding: 10px; background: transparent; border: 1px solid var(--line); border-radius: 8px; color: inherit; font: inherit; cursor: pointer; }
+.identity-form button:disabled { opacity: .5; cursor: default; }
+.identity-notice, .identity-status { font-size: 13px; line-height: 1.6; }
+.identity-notice { color: var(--muted); }
+.identity-status { color: var(--forest); }
+.identity-card > .account-menu { margin-top: 24px; }
+.outcome-unscored { background: var(--card); color: var(--muted); }
+@media (max-width: 580px) {
+  .identity-row { grid-template-columns: 1fr; }
+  .identity-remove { justify-self: start; }
+}
 @media (max-width: 900px) {
   .topbar { grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 22px; }
   nav { justify-content: center; gap: clamp(12px, 2.6vw, 24px); font-size: 13px; }

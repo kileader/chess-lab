@@ -28,8 +28,8 @@ def copy_library(source_path, local_user_id, target=None, subject=None):
         raise ValueError('Destination account not found. Sign in first and verify the Supabase user ID.')
     with target._connect() as connection:
         for identity in identities:
-            existing = connection.execute('SELECT username_normalized FROM account_player_identities WHERE user_id = ? AND platform = ?', (user_id, identity['platform'])).fetchone()
-            if existing and existing['username_normalized'] != identity['username_normalized']:
+            existing = connection.execute('SELECT username_normalized FROM account_player_identities WHERE user_id = ? AND platform = ?', (user_id, identity['platform'])).fetchall()
+            if existing and identity['username_normalized'] not in {row['username_normalized'] for row in existing}:
                 raise ValueError('Destination chess identity differs. No data was copied.')
             connection.execute('INSERT INTO account_player_identities(user_id, platform, username, username_normalized) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING', (user_id, identity['platform'], identity['username'], identity['username_normalized']))
         connection.execute("UPDATE users SET display_name = ? WHERE id = ? AND display_name = 'Chess player'", (profile['display_name'], user_id))

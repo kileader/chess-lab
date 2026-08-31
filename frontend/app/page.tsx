@@ -1,6 +1,7 @@
 import { requireAccount, serverApi } from '../lib/api-server';
 import { AccountMenu } from './account-menu';
 import { safeGameLink } from '../lib/safe-link';
+import { gameOutcome } from '../lib/game-outcome';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,6 +36,7 @@ type UserOverview = {
 };
 
 type GameSummary = {
+  source: string;
   date: string | null;
   white: string | null;
   black: string | null;
@@ -337,8 +339,8 @@ export default async function Home({ searchParams }: PageProps) {
         </nav>
         <div className="profile-pill">
           <span className="status-dot" />
-          <span>{identity?.username ?? overview.user.display_name}</span>
-          <small>{identity?.platform.replace('_', '.') ?? 'local'}</small><AccountMenu />
+          <span>{overview.user.identities.length > 1 ? overview.user.display_name : identity?.username ?? overview.user.display_name}</span>
+          <small>{overview.user.identities.length > 1 ? `${overview.user.identities.length} usernames` : identity?.platform.replace('_', '.') ?? 'local'}</small><AccountMenu />
         </div>
       </header>
 
@@ -514,14 +516,10 @@ export default async function Home({ searchParams }: PageProps) {
             </div>
             <div className="game-list">
               {recentGames.map((game, index) => {
-                const username = identity?.username.toLowerCase();
-                const isWhite = game.white?.toLowerCase() === username;
-                const won = (isWhite && game.result === '1-0') || (!isWhite && game.result === '0-1');
-                const drew = game.result === '1/2-1/2';
-                const outcome = drew ? 'Draw' : won ? 'Win' : 'Loss';
+                const outcome = gameOutcome(game, overview.user.identities);
                 return (
                   <a className="game-row" href={safeGameLink(game.source_url)} key={`${game.source_url}-${index}`} target={game.source_url ? '_blank' : undefined} rel="noreferrer">
-                    <span className={`outcome outcome-${outcome.toLowerCase()}`}>{outcome[0]}</span>
+                    <span className={`outcome outcome-${outcome.toLowerCase()}`} title={outcome}>{outcome === 'Unscored' ? '—' : outcome[0]}</span>
                     <div className="matchup">
                       <strong>{game.white ?? 'Unknown'} <i>vs</i> {game.black ?? 'Unknown'}</strong>
                       <span>{game.opening ?? 'Unclassified opening'}</span>

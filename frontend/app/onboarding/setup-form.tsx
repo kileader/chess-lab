@@ -21,7 +21,7 @@ export function SetupForm() {
     <label>Display name<input name="display_name" required maxLength={80} autoComplete="nickname" disabled={pending} /></label>
     <label>Chess platform<select name="platform" disabled={pending}><option value="lichess">Lichess</option><option value="chess_com">Chess.com</option></select></label>
     <label>Chess username<input name="username" required maxLength={40} pattern="[A-Za-z0-9_\-]+" autoComplete="off" disabled={pending} /></label>
-    <small>Start with one chess account. Use its exact username so we can identify your games.</small>
+    <small>Use your chess username, not your Google or Discord display name. You can correct it or add more usernames in account settings afterward.</small>
     <button className="auth-button" disabled={pending}>{pending ? 'Saving…' : 'Open my workspace'}</button>
     {error && <p role="alert" className="explorer-error">{error}</p>}
   </form>;

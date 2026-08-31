@@ -4,11 +4,13 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useState } from 'react';
 import { apiFetch } from '../lib/api-client';
 import { practiceError } from './practice-position';
+import Link from 'next/link';
 
 type ImportSummary = {
   games_received: number;
   games_added: number;
   duplicates_skipped: number;
+  matched_games?: number | null;
 };
 
 
@@ -64,6 +66,7 @@ export function UploadForm() {
         </p>
       )}
       {error && <p className="upload-error" role="alert">{error}</p>}
+      {summary && summary.games_received > 0 && summary.matched_games === 0 && <p className="upload-error" role="alert">Your games were kept, but none match exactly one of your saved usernames. <Link href="/settings">Check your usernames and platforms</Link>—saving a correction will match these games again.</p>}
     </form>
   );
 }

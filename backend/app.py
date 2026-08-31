@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 import chess
 
@@ -31,6 +31,7 @@ class ImportResponse(BaseModel):
     games_received: int
     games_added: int
     duplicates_skipped: int
+    matched_games: int | None = None
 
 
 class GameSummary(BaseModel):
@@ -349,10 +350,30 @@ app.add_middleware(CORSMiddleware,
 )
 
 
-class AccountSetup(BaseModel):
-    display_name: str = Field(min_length=1, max_length=80)
+class ChessIdentityInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
     platform: Literal["lichess", "chess_com"]
     username: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
+
+    @field_validator('username', mode='before')
+    @classmethod
+    def trim_username(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class AccountSetup(ChessIdentityInput):
+    display_name: str = Field(min_length=1, max_length=80)
+
+
+class AccountIdentitiesUpdate(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    identities: list[ChessIdentityInput] = Field(min_length=1, max_length=10)
+
+
+class AccountIdentitiesResult(BaseModel):
+    account: UserProfile
+    library_games: int
+    matched_games: int
 
 
 @app.get("/api/account", response_model=UserProfile)
@@ -379,13 +400,24 @@ def setup_account(request: Request, details: AccountSetup, storage: StorageDepen
     return current_account(request, storage)
 
 
+@app.patch('/api/account/identities', response_model=AccountIdentitiesResult)
+def update_account_identities(request: Request, details: AccountIdentitiesUpdate, storage: StorageDependency):
+    if request.state.user_id is None:
+        raise HTTPException(409, 'Username settings require Google sign-in.')
+    try:
+        counts = storage.update_account_identities(request.state.user_id, [identity.model_dump() for identity in details.identities])
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return AccountIdentitiesResult(account=current_account(request, storage), **counts)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     """Report whether the API process is running."""
     return {"status": "ok"}
 
 
-@app.post("/api/games/import")
+@app.post("/api/games/import", response_model_exclude_none=True)
 async def import_games(
     request: Request,
     file: UploadFile,
@@ -395,15 +427,23 @@ async def import_games(
     owner = request.state.user_id
     if file.size is None or file.size > 10 * 1024 * 1024:
         raise HTTPException(413, "Choose a PGN file smaller than 10 MB.")
-    if owner is not None and not storage.get_user_profile(owner)["identities"]:
+    identities = storage.get_user_profile(owner)['identities'] if owner is not None else []
+    if owner is not None and not identities:
         raise HTTPException(409, "Set your chess username before importing games.")
     await file.seek(0)
     pgn_stream = TextIOWrapper(file.file, encoding="utf-8-sig")
+    identity_keys = {(identity['platform'], identity['username'].casefold()) for identity in identities}
+    matched_games = 0
     try:
         def bounded_games():
+            nonlocal matched_games
             for index, game in enumerate(iter_game_records(pgn_stream, default_opening_catalog)):
                 if index >= 5000:
                     raise HTTPException(413, "Import at most 5,000 games at a time.")
+                white_matches = (game.source, (game.white or '').casefold()) in identity_keys
+                black_matches = (game.source, (game.black or '').casefold()) in identity_keys
+                if white_matches != black_matches:
+                    matched_games += 1
                 yield game
         games_received, games_added = storage.import_games(bounded_games(), owner_user_id=owner)
     except UnicodeDecodeError as error:
@@ -418,6 +458,7 @@ async def import_games(
         games_received=games_received,
         games_added=games_added,
         duplicates_skipped=games_received - games_added,
+        matched_games=matched_games if owner is not None else None,
     )
 
 

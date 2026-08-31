@@ -56,6 +56,32 @@ Railway's pre-deploy command applies versioned PostgreSQL migrations transaction
 under an advisory lock. Migrations never copy or expose the local database.
 Production refuses local-auth bypass. Local preview remains direct loopback-only.
 
+### Editable chess usernames
+
+Signed-in users can open **Usernames** in the account menu (`/settings`) to correct
+names, add accounts on either platform, or remove obsolete names. At least one and
+at most ten usernames are required. Multiple names on the same platform are allowed;
+case-insensitive duplicates within a platform are rejected.
+
+`PATCH /api/account/identities` accepts an `identities` list of `{platform, username}`.
+The target account is always taken from the verified session, never the payload.
+Saving atomically replaces that account's identities and rebuilds links for games
+whose `owner_user_id` matches it. Imports and edits serialize on the account row.
+The endpoint reports the number of owned games and the number matched to one side.
+It does not delete games, repertoire plans, practice positions, or notes.
+
+Only usernames on a game's source platform match. Games where neither player or
+both players match remain in the private library, but are excluded from personal
+statistics. Adding another person's name does not grant access to their library.
+The user's own usernames contribute to combined stats; per-player libraries are not
+implemented. Imports with zero single-side matches include a settings reminder.
+
+Migration `002_multiple_chess_identities.sql` expands the PostgreSQL identity primary
+key without deleting rows. Ensure Railway's **Pre-deploy Command** is
+`python -m backend.migrate` and verify `Database migrations complete.` before testing
+the settings page. SQLite performs an atomic table-copy upgrade of the older key.
+PostgreSQL tests cover both fresh schemas and upgrading existing identity records.
+
 ## Preserve Kevin's current data
 
 Leave the SQLite file in place and take a backup before transferring it. First sign
@@ -96,8 +122,8 @@ counts and deployed cross-account checks pass.
 
 ## Beta constraints
 
-- One chess identity per account during onboarding. It describes imported games;
-  it does not prove ownership of a Lichess/Chess.com account.
+- Onboarding starts with one chess identity; account settings supports up to ten.
+  A username describes imported games, not verified ownership of a chess account.
 - Maximum 10 MB and 5,000 games per import. Private imports are not a shared library.
 - Expensive synchronous Stockfish endpoints are off for authenticated beta users.
   Opening results, adjusted scores, explorer and practice bookmarks do not need the
