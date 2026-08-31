@@ -119,7 +119,32 @@ with a retry message, retaining earlier completed months. Before scaling to mult
 workers/replicas, replace that guard with a shared provider queue/limiter. Chess.com's
 caching can delay recent games. No scheduler, persistent sync job, additional service,
 new environment variables, or database migration is needed for this release.
-Lichess syncing and scheduled syncing are not implemented; PGN uploads remain available.
+Scheduled syncing is not implemented; PGN uploads remain available.
+
+### Manual Lichess sync
+
+The same **Import games** page has a Lichess selector. Choose a saved Lichess username,
+dates and time control (rapid by default). Settings links include the platform, so
+the same name saved on both sites opens the correct importer. Only completed standard
+games are saved. Unlike Chess.com, Lichess dates use game **creation/start time in UTC**.
+The selected end date is inclusive; internally windows are `[since, until)` in milliseconds.
+
+`POST /api/games/sync/lichess/plan` checks the public export for a first game in the
+range and returns months to examine, newest first. `/month` downloads at most 201
+games. Full batches split into two adjacent timestamp windows before saving; the
+browser processes those sequentially until each contains at most 200 games. This
+avoids silently truncating a busy month or losing tied timestamps. Each completed
+batch is persisted; Stop prevents the next batch, and retries deduplicate saved games.
+There is no background job. Keep the page open; navigating away stops further batches.
+
+The provider uses anonymous NDJSON exports from a fixed HTTPS endpoint, with no
+redirects or credentials, a serial process lock, time/size limits, and a 60-second
+cooldown after HTTP 429. Direct exports are used without provider-side performance
+filters, because those use Lichess's search index with different freshness/precision.
+Speed and standard-chess filtering happen locally. Consequently a plan can contain
+months with no games matching the chosen speed. The response has a 12 MiB limit,
+each selected PGN has a 128 KiB limit, and invalid streams/games abort the batch.
+No new credentials, service, schema changes, or environment variables are required.
 
 ## Preserve Kevin's current data
 

@@ -362,6 +362,9 @@ footer { display: flex; justify-content: space-between; padding: 25px 0 45px; bo
 .import-card { width: min(100%, 720px); max-width: 720px; }
 .import-card h2 { margin: 22px 0 16px; font-size: 22px; letter-spacing: -.03em; }
 .sync-form fieldset { display: grid; gap: 16px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.sync-providers { display: flex; gap: 10px; margin-top: 24px; }
+.sync-providers a { border: 1px solid var(--line); padding: 10px 16px; border-radius: 8px; }
+.sync-providers a[aria-current="page"] { background: var(--forest); color: white; border-color: var(--forest); }
 .sync-form legend { margin-bottom: 16px; color: var(--muted); font-size: 13px; }
 .sync-dates { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .sync-form input, .sync-form select { min-width: 0; width: 100%; }

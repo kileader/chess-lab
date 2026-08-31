@@ -29,24 +29,37 @@ export function defaultSyncDates(today: Date) {
 }
 
 // Keep requests sequential. Each completed month is durable; restarting deduplicates.
-export async function runChessComSync(
+export async function runGameSync(
   options: SyncOptions,
-  request: (path: string, body: Record<string, string>) => Promise<unknown>,
+  request: (path: string, body: Record<string, string | number>) => Promise<unknown>,
   onProgress: (progress: SyncProgress) => void,
   shouldStop: () => boolean,
+  provider: 'chess-com' | 'lichess' = 'chess-com',
 ): Promise<SyncProgress> {
   const progress = emptySyncProgress();
-  const plan = await request('/api/games/sync/chess-com/plan', options) as { months: string[] };
+  const plan = await request(`/api/games/sync/${provider}/plan`, options) as { months: string[] };
   progress.total = plan.months.length;
   onProgress({ ...progress });
-  for (const month of plan.months) {
+  months: for (const month of plan.months) {
     if (shouldStop()) { progress.stopped = true; break; }
     progress.currentMonth = month;
     onProgress({ ...progress });
-    const result = await request('/api/games/sync/chess-com/month', { ...options, month }) as Pick<SyncProgress,
-      'games_received' | 'games_added' | 'duplicates_skipped' | 'filtered_games' | 'matched_games'>;
-    for (const key of ['games_received', 'games_added', 'duplicates_skipped', 'filtered_games', 'matched_games'] as const) {
-      progress[key] += result[key];
+    const windows: Record<string, number>[] = [{}];
+    while (windows.length) {
+      if (shouldStop()) { progress.stopped = true; break months; }
+      const window = windows.shift()!;
+      const result = await request(`/api/games/sync/${provider}/month`, { ...options, month, ...window }) as Pick<SyncProgress,
+        'games_received' | 'games_added' | 'duplicates_skipped' | 'filtered_games' | 'matched_games'> & {
+          windows?: Array<{ since: number; until: number }>;
+        };
+      if (result.windows?.length) {
+        windows.unshift(...result.windows);
+        continue;
+      }
+      for (const key of ['games_received', 'games_added', 'duplicates_skipped', 'filtered_games', 'matched_games'] as const) {
+        progress[key] += result[key];
+      }
+      onProgress({ ...progress });
     }
     progress.completed += 1;
     progress.currentMonth = null;

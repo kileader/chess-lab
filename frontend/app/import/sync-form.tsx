@@ -4,12 +4,15 @@ import Link from 'next/link';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiFetch } from '../../lib/api-client';
-import { emptySyncProgress, runChessComSync, type SyncProgress } from '../../lib/chesscom-sync';
+import { emptySyncProgress, runGameSync, type SyncProgress } from '../../lib/game-sync';
 import { practiceError } from '../practice-position';
 
-export function ChessComSyncForm({ usernames, initialUsername, dateFrom, dateTo }: {
+export function SyncForm({ usernames, initialUsername, dateFrom, dateTo, provider }: {
   usernames: string[]; initialUsername: string; dateFrom: string; dateTo: string;
+  provider: 'chess-com' | 'lichess';
 }) {
+  const label = provider === 'lichess' ? 'Lichess' : 'Chess.com';
+  const unit = provider === 'lichess' ? 'batch' : 'month';
   const router = useRouter();
   const [username, setUsername] = useState(initialUsername);
   const [from, setFrom] = useState(dateFrom);
@@ -32,14 +35,14 @@ export function ChessComSyncForm({ usernames, initialUsername, dateFrom, dateTo 
     stop.current = false;
     setPending(true); setStopping(false); setFinished(false); setError(null); setProgress(emptySyncProgress());
     try {
-      await runChessComSync({ username, date_from: from, date_to: to, time_class: speed }, async (path, body) => {
+      await runGameSync({ username, date_from: from, date_to: to, time_class: speed }, async (path, body) => {
         const response = await apiFetch(path, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body), signal: controller.signal,
         });
         if (!response.ok) throw new Error(await practiceError(response, 'Could not sync games. Try again.'));
         return response.json();
-      }, setProgress, () => stop.current);
+      }, setProgress, () => stop.current, provider);
       setFinished(true);
     } catch (problem) {
       if (!controller.signal.aborted) setError(problem instanceof Error ? problem.message : 'Could not sync games.');
@@ -49,12 +52,12 @@ export function ChessComSyncForm({ usernames, initialUsername, dateFrom, dateTo 
     }
   }
 
-  if (!usernames.length) return <p className="sync-notice">First <Link href="/settings">add your Chess.com username</Link>. Lichess and Other games can still be uploaded as PGNs below.</p>;
+  if (!usernames.length) return <p className="sync-notice">First <Link href="/settings">add your {label} username</Link>. PGN uploads remain available below.</p>;
 
   return <form className="position-form sync-form" onSubmit={(event) => void sync(event)}>
     <fieldset disabled={pending}>
       <legend>Download your completed games</legend>
-      <label>Chess.com username<select value={username} onChange={(event) => setUsername(event.target.value)} required>
+      <label>{label} username<select value={username} onChange={(event) => setUsername(event.target.value)} required>
         {usernames.map((name) => <option value={name} key={name}>{name}</option>)}
       </select></label>
       <div className="sync-dates">
@@ -62,12 +65,14 @@ export function ChessComSyncForm({ usernames, initialUsername, dateFrom, dateTo 
         <label>Through<input type="date" required min={from || '2007-01-01'} max={dateTo} value={to} onChange={(event) => setTo(event.target.value)} /></label>
       </div>
       <label>Time control<select value={speed} onChange={(event) => setSpeed(event.target.value)}>
-        <option value="rapid">Rapid</option><option value="blitz">Blitz</option><option value="bullet">Bullet</option><option value="daily">Daily</option><option value="all">All time controls</option>
+        <option value="rapid">Rapid</option><option value="blitz">Blitz</option><option value="bullet">Bullet</option>
+        {provider === 'lichess' ? <><option value="ultraBullet">UltraBullet</option><option value="classical">Classical</option><option value="correspondence">Correspondence</option></> : <option value="daily">Daily</option>}
+        <option value="all">All time controls</option>
       </select></label>
-      <small>Standard chess only. Dates include both endpoints and use when a game ended (UTC). No Chess.com password needed.</small>
+      <small>Standard chess only. Dates include both endpoints and use when a game {provider === 'lichess' ? 'started' : 'ended'} (UTC). No {label} password needed.</small>
       <button className="auth-button" type="submit">{pending ? 'Syncing games…' : error || progress?.stopped ? 'Retry sync games' : 'Sync games'}</button>
     </fieldset>
-    {pending && <button className="identity-remove" type="button" disabled={stopping} onClick={() => { stop.current = true; setStopping(true); }}>Stop after current month</button>}
+    {pending && <button className="identity-remove" type="button" disabled={stopping} onClick={() => { stop.current = true; setStopping(true); }}>Stop after current {unit}</button>}
     {progress && <div className="sync-progress" role="status" aria-live="polite">
       <strong>{pending ? stopping ? 'Stopping after this request…' : progress.currentMonth ? `Importing ${progress.currentMonth}…` : 'Checking available archives…' : error ? 'Sync interrupted' : progress.stopped ? 'Sync stopped' : 'Sync complete'}</strong>
       {progress.total > 0 && <><progress aria-label="Months imported" max={progress.total} value={progress.completed} /><span>{progress.completed} of {progress.total} months checked</span></>}
@@ -76,7 +81,7 @@ export function ChessComSyncForm({ usernames, initialUsername, dateFrom, dateTo 
       {finished && progress.games_received > 0 && progress.matched_games === 0 && <p>Your imports were kept, but both sides match your saved names. <Link href="/settings">Check your usernames</Link> to include them in personal stats.</p>}
       {!pending && <Link href="/?period=all">View your dashboard — all dates →</Link>}
     </div>}
-    {error && <p className="upload-error" role="alert">{error} Completed months are saved. Retrying skips duplicates, including a month saved before a connection dropped.</p>}
-    <p className="sync-notice">Keep this page open while syncing. Games are saved month by month into your private library. This is a manual sync, not a scheduled import. Chess.com caches its archives, so recent games may appear later.</p>
+    {error && <p className="upload-error" role="alert">{error} Completed imports are saved. Retrying skips duplicates, including games saved before a connection dropped.</p>}
+    <p className="sync-notice">Keep this page open while syncing. Games are saved {unit} by {unit} into your private library. This is a manual sync, not a scheduled import. {provider === 'chess-com' ? 'Chess.com caches its archives, so recent games may appear later.' : 'Large months are split into smaller batches. Only finished games are included.'}</p>
   </form>;
 }

@@ -536,7 +536,7 @@ export default async function Home({ searchParams }: PageProps) {
           <aside className="panel import-panel" id="upload">
             <p className="eyebrow">Keep the archive current</p>
             <h2>Import games</h2>
-            <Link className="sync-import-link" href="/import">Sync from Chess.com →</Link>
+            <Link className="sync-import-link" href="/import">Sync from Chess.com or Lichess →</Link>
             <p>Add a Lichess, Chess.com, or standard PGN archive. Existing games are skipped automatically.</p>
             <UploadForm />
           </aside>

@@ -483,3 +483,59 @@ def test_chesscom_sync_failure_keeps_previous_month_and_can_retry(accounts, monk
     assert storage.count_games(owner_user_id=user_id) == 1
     monkeypatch.setattr('backend.app.monthly_records', lambda *args: ([record], 0))
     assert client.post('/api/games/sync/chess-com/month', headers=headers, json=body).json()['duplicates_skipped'] == 1
+
+
+def test_lichess_sync_private_deduplicated_and_validates_windows(accounts, monkeypatch):
+    client, storage = accounts
+    alice, bob = {'Authorization': 'Bearer alice'}, {'Authorization': 'Bearer bob'}
+    profile = {'display_name': 'Alice', 'platform': 'lichess', 'username': 'Alice'}
+    a = client.post('/api/account', headers=alice, json=profile).json()['id']
+    b = client.post('/api/account', headers=bob, json=profile).json()['id']
+    pgn = (Path(__file__).parent / 'fixtures' / 'normal_game.pgn').read_text().replace('[Site "Local"]', '[Site "https://lichess.org/aB3dE5gH"]')
+    def export(*args, **kwargs):
+        return [{'id': 'aB3dE5gH', 'createdAt': 1787788800000, 'status': 'mate', 'variant': 'standard', 'perf': 'rapid', 'pgn': pgn}]
+    monkeypatch.setattr('chesslab.lichess.export_games', export)
+    body = {'username': 'ALICE', 'date_from': '2026-08-27', 'date_to': '2026-08-27', 'time_class': 'rapid'}
+    assert client.post('/api/games/sync/lichess/plan', headers=alice, json=body).json() == {'months': ['2026-08']}
+    endpoint = '/api/games/sync/lichess/month'
+    month = {**body, 'month': '2026-08'}
+    result = client.post(endpoint, headers=alice, json=month)
+    assert result.status_code == 200
+    assert result.json()['games_added'] == 1 and result.json()['matched_games'] == 1
+    assert client.post(endpoint, headers=alice, json=month).json()['duplicates_skipped'] == 1
+    assert storage.count_games(owner_user_id=b) == 0
+    assert client.post('/api/games/import', headers=bob, files={'file': ('game.pgn', pgn)}).json()['games_added'] == 1
+    assert client.post(endpoint, headers=bob, json=month).json()['duplicates_skipped'] == 1
+    assert client.get(f'/api/users/{a}/overview', headers=alice).json()['total_games'] == 1
+    def unexpected(*args, **kwargs):
+        pytest.fail('Invalid requests must not contact Lichess')
+    monkeypatch.setattr('chesslab.lichess.export_games', unexpected)
+    assert client.post(endpoint, json=month).status_code == 401
+    for changes in [{'username': 'Other'}, {'username': '../Alice'}, {'user_id': b}, {'month': '2026-07'},
+                    {'time_class': 'daily'}, {'since': 1787788800000},
+                    {'since': 0, 'until': 1787788800000}, {'since': 1787788800000, 'until': 1787788800000},
+                    {'since': 1787788800000, 'until': 9999999999999}]:
+        assert client.post(endpoint, headers=alice, json={**month, **changes}).status_code == 422
+    storage.update_account_identities(a, [{'platform': 'chess_com', 'username': 'Alice'}])
+    assert client.post(endpoint, headers=alice, json=month).status_code == 422
+
+
+def test_lichess_split_and_failure_do_not_write_partial_batches(accounts, monkeypatch):
+    client, storage = accounts
+    headers = {'Authorization': 'Bearer alice'}
+    user_id = client.post('/api/account', headers=headers, json={'display_name': 'Alice', 'platform': 'lichess', 'username': 'Alice'}).json()['id']
+    record = replace(load_game_records(Path(__file__).parent / 'fixtures' / 'normal_game.pgn')[0], source='lichess')
+    storage.import_games([record], owner_user_id=user_id)
+    windows = [{'since': 1787788800000, 'until': 1787788800500}, {'since': 1787788800500, 'until': 1787788801000}]
+    monkeypatch.setattr('chesslab.lichess.batch_records', lambda *args: ([], 0, windows))
+    body = {'username': 'Alice', 'date_from': '2026-08-27', 'date_to': '2026-08-27', 'month': '2026-08'}
+    endpoint = '/api/games/sync/lichess/month'
+    assert client.post(endpoint, headers=headers, json=body).json() == {'windows': windows}
+    from chesslab.lichess import LichessError
+    def fail(*args):
+        raise LichessError('Wait a minute, then retry.', 429)
+    monkeypatch.setattr('chesslab.lichess.batch_records', fail)
+    assert client.post(endpoint, headers=headers, json=body).status_code == 429
+    assert storage.count_games(owner_user_id=user_id) == 1
+    monkeypatch.setattr('chesslab.lichess.batch_records', lambda *args: ([record], 0, []))
+    assert client.post(endpoint, headers=headers, json={**body, **windows[0]}).json()['duplicates_skipped'] == 1

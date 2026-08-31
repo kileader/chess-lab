@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultSyncDates, runChessComSync } from '../lib/chesscom-sync.ts';
+import { defaultSyncDates, runGameSync as runChessComSync } from '../lib/game-sync.ts';
 
 const options = { username: 'Alice', date_from: '2026-01-01', date_to: '2026-08-30', time_class: 'rapid' };
 const monthResult = { games_received: 3, games_added: 2, duplicates_skipped: 1, filtered_games: 4, matched_games: 3 };
@@ -55,4 +55,33 @@ test('Empty plans succeed without requesting months, and defaults cover 90 days'
   assert.equal(requests, 1);
   assert.equal(result.games_received, 0);
   assert.deepEqual(defaultSyncDates(new Date('2026-08-30T23:59:59Z')), { date_from: '2026-06-01', date_to: '2026-08-30' });
+});
+
+test('Lichess expands bounded windows sequentially and counts a month only after all batches', async () => {
+  const calls = [];
+  const updates = [];
+  const result = await runChessComSync(options, async (path, body) => {
+    calls.push({ path, body });
+    assert.ok(path.startsWith('/api/games/sync/lichess/'));
+    if (path.endsWith('/plan')) return { months: ['2026-08'] };
+    if (body.since === undefined) return { windows: [{ since: 1000, until: 2000 }, { since: 2000, until: 3000 }] };
+    return monthResult;
+  }, (progress) => updates.push(progress), () => false, 'lichess');
+  assert.deepEqual(calls.slice(2).map(({ body }) => [body.since, body.until]), [[1000, 2000], [2000, 3000]]);
+  assert.equal(result.completed, 1);
+  assert.equal(result.games_added, 4);
+  assert.ok(updates.some((progress) => progress.games_added === 2 && progress.completed === 0));
+});
+
+test('Lichess stops between batches and preserves confirmed imports in a partial month', async () => {
+  let stop = false;
+  const result = await runChessComSync(options, async (path, body) => {
+    if (path.endsWith('/plan')) return { months: ['2026-08'] };
+    if (body.since === undefined) return { windows: [{ since: 1000, until: 2000 }, { since: 2000, until: 3000 }] };
+    stop = true;
+    return monthResult;
+  }, () => {}, () => stop, 'lichess');
+  assert.equal(result.completed, 0);
+  assert.equal(result.games_added, 2);
+  assert.equal(result.stopped, true);
 });

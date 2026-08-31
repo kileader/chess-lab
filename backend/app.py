@@ -18,6 +18,7 @@ from backend.request_limits import RequestSizeLimit
 
 from chesslab import APP_NAME
 from chesslab.chesscom import ChessComError, archive_months, monthly_records
+from chesslab import lichess
 from chesslab.explorer import explore_position
 from chesslab.importer import iter_game_records
 from chesslab.identities import validate_chess_username
@@ -449,19 +450,20 @@ class ChessComMonthRequest(ChessComSyncRequest):
         return self
 
 
-def require_chesscom_identity(request: Request, details: ChessComSyncRequest, storage):
+def require_sync_identity(request: Request, details: ChessComSyncRequest, storage, platform='chess_com'):
     owner = request.state.user_id
     if owner is None:
         raise HTTPException(409, 'Sign in with Google to sync games into your private library.')
     identities = storage.get_user_profile(owner)['identities']
-    if not any(identity['platform'] == 'chess_com' and identity['username'].lower() == details.username.lower() for identity in identities):
-        raise HTTPException(422, 'Add this Chess.com username in Usernames settings before syncing.')
+    if not any(identity['platform'] == platform and identity['username'].lower() == details.username.lower() for identity in identities):
+        label = 'Lichess' if platform == 'lichess' else 'Chess.com'
+        raise HTTPException(422, f'Add this {label} username in Usernames settings before syncing.')
     return owner, identities
 
 
 @app.post('/api/games/sync/chess-com/plan')
 def plan_chesscom_sync(request: Request, details: ChessComSyncRequest, storage: StorageDependency):
-    require_chesscom_identity(request, details, storage)
+    require_sync_identity(request, details, storage)
     try:
         return {'months': archive_months(details.username, details.date_from, details.date_to)}
     except ChessComError as error:
@@ -470,15 +472,65 @@ def plan_chesscom_sync(request: Request, details: ChessComSyncRequest, storage: 
 
 @app.post('/api/games/sync/chess-com/month')
 def sync_chesscom_month(request: Request, details: ChessComMonthRequest, storage: StorageDependency):
-    owner, _ = require_chesscom_identity(request, details, storage)
+    owner, _ = require_sync_identity(request, details, storage)
     try:
         records, filtered = monthly_records(details.username, details.month, details.date_from,
                                              details.date_to, details.time_class, default_opening_catalog)
     except ChessComError as error:
         raise HTTPException(error.status_code, str(error)) from error
     # Recheck after the network request in case the user edited identities meanwhile.
-    _, identities = require_chesscom_identity(request, details, storage)
+    _, identities = require_sync_identity(request, details, storage)
     usernames = {identity['username'].lower() for identity in identities if identity['platform'] == 'chess_com'}
+    received, added = storage.import_games(records, owner_user_id=owner)
+    matched = sum(((game.white or '').lower() in usernames) != ((game.black or '').lower() in usernames) for game in records)
+    return {'month': details.month, 'games_received': received, 'games_added': added,
+            'duplicates_skipped': received - added, 'filtered_games': filtered, 'matched_games': matched}
+
+
+class LichessSyncRequest(ChessComSyncRequest):
+    time_class: Literal['rapid', 'blitz', 'bullet', 'ultraBullet', 'classical', 'correspondence', 'all'] = 'rapid'
+
+
+class LichessMonthRequest(LichessSyncRequest):
+    month: str = Field(pattern=r'^\d{4}-(0[1-9]|1[0-2])$')
+    since: int | None = Field(default=None, strict=True)
+    until: int | None = Field(default=None, strict=True)
+
+    @model_validator(mode='after')
+    def valid_window(self):
+        if not self.date_from.strftime('%Y-%m') <= self.month <= self.date_to.strftime('%Y-%m'):
+            raise ValueError('The archive month must fall inside the selected dates.')
+        start, end = lichess.month_bounds(self.month, self.date_from, self.date_to)
+        if (self.since is None) != (self.until is None):
+            raise ValueError('Both window bounds are required.')
+        if self.since is not None and not start <= self.since < self.until <= end:
+            raise ValueError('The batch must fall inside the selected month and dates.')
+        return self
+
+
+@app.post('/api/games/sync/lichess/plan')
+def plan_lichess_sync(request: Request, details: LichessSyncRequest, storage: StorageDependency):
+    require_sync_identity(request, details, storage, 'lichess')
+    try:
+        return {'months': lichess.archive_months(details.username, details.date_from, details.date_to, details.time_class)}
+    except lichess.LichessError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+
+
+@app.post('/api/games/sync/lichess/month')
+def sync_lichess_month(request: Request, details: LichessMonthRequest, storage: StorageDependency):
+    owner, _ = require_sync_identity(request, details, storage, 'lichess')
+    since, until = lichess.month_bounds(details.month, details.date_from, details.date_to)
+    if details.since is not None:
+        since, until = details.since, details.until
+    try:
+        records, filtered, windows = lichess.batch_records(details.username, since, until, details.time_class, default_opening_catalog)
+    except lichess.LichessError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+    if windows:
+        return {'windows': windows}
+    _, identities = require_sync_identity(request, details, storage, 'lichess')
+    usernames = {identity['username'].lower() for identity in identities if identity['platform'] == 'lichess'}
     received, added = storage.import_games(records, owner_user_id=owner)
     matched = sum(((game.white or '').lower() in usernames) != ((game.black or '').lower() in usernames) for game in records)
     return {'month': details.month, 'games_received': received, 'games_added': added,
