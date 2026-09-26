@@ -875,6 +875,22 @@ def user_opening_detail(
     return OpeningDetail.model_validate(detail)
 
 
+@app.get("/api/users/{user_id}/openings/continuation", response_model=list[str])
+def user_opening_continuation(
+    user_id: int,
+    storage: StorageDependency,
+    family: Annotated[str, Query(min_length=1, max_length=160)],
+    opening: Annotated[str, Query(min_length=1, max_length=160)],
+) -> list[str]:
+    """Resolve a catalog line to explorer moves after its family root."""
+    if storage.get_user_profile(user_id) is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    continuation = default_opening_catalog.continuation_for_name(family, opening)
+    if continuation is None:
+        raise HTTPException(status_code=404, detail="Opening line is not in this family.")
+    return continuation
+
+
 @app.get("/api/users/{user_id}/openings/explorer", response_model=OpeningExplorer)
 def user_opening_explorer(
     user_id: int,

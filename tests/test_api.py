@@ -238,6 +238,28 @@ def test_user_overview_uses_linked_platform_identity(
         ],
     }
 
+    continuation = client.get(
+        f"/api/users/{user_id}/openings/continuation",
+        params={"family": "King's Pawn Game", "opening": "King's Pawn Game"},
+    )
+    assert continuation.status_code == 200
+    assert continuation.json() == []
+    london_continuation = client.get(
+        f"/api/users/{user_id}/openings/continuation",
+        params={
+            "family": "Indian Defense",
+            "opening": "Indian Defense: Accelerated London System",
+        },
+    )
+    assert london_continuation.status_code == 200
+    assert london_continuation.json() == ["c1f4"]
+    focused_explorer = client.get(
+        f"/api/users/{user_id}/openings/explorer",
+        params={"family": "Indian Defense", "color": "black", "line": "c1f4"},
+    )
+    assert focused_explorer.status_code == 200
+    assert focused_explorer.json()["san_path"] == ["d4", "Nf6", "Bf4"]
+
     detail_response = client.get(
         f"/api/users/{user_id}/openings/detail",
         params={"family": "King's Pawn Game"},

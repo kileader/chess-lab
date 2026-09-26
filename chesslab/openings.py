@@ -70,6 +70,28 @@ class OpeningCatalog:
             return []
         return list(min(family_lines, key=len))
 
+    def continuation_for_name(self, family: str, name: str) -> list[str] | None:
+        """Return the named line's UCI moves after its family's root position."""
+        if name != family and not name.startswith(f"{family}:"):
+            return None
+        root_moves = self.moves_for_name(family)
+        named_moves = self.moves_for_name(name)
+        if not root_moves or not named_moves:
+            return None
+        root = chess.Board()
+        for san in root_moves:
+            root.push_san(san)
+        board = chess.Board()
+        continuation: list[str] | None = None
+        for san in named_moves:
+            move = board.parse_san(san)
+            if continuation is not None:
+                continuation.append(move.uci())
+            board.push(move)
+            if board.epd() == root.epd() and continuation is None:
+                continuation = []
+        return continuation
+
     def classify_game(self, game: chess.pgn.Game) -> OpeningMatch | None:
         """Return the last known opening position reached on the main line."""
         board = game.board()

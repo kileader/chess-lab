@@ -167,7 +167,15 @@ export default async function OpeningPage({ params, searchParams }: PageProps) {
   const explorerQuery = new URLSearchParams(filters);
   explorerQuery.set('family', family);
   explorerQuery.set('color', explorerColor);
-  const initialLine = firstValue(rawSearchParams.line)?.split(',').filter(Boolean) ?? [];
+  let initialLine = firstValue(rawSearchParams.line)?.split(',').filter(Boolean) ?? [];
+  const focus = firstValue(rawSearchParams.focus);
+  if (focus && !initialLine.length) {
+    try {
+      const focusQuery = new URLSearchParams({ family, opening: focus });
+      const response = await serverApi(`/api/me/openings/continuation?${focusQuery}`, { cache: 'no-store' });
+      if (response.ok) initialLine = await response.json() as string[];
+    } catch { /* The family explorer can still start at its root. */ }
+  }
   if (initialLine.length) explorerQuery.set('line', initialLine.join(','));
   let explorer: ExplorerData | null = null;
   try {
